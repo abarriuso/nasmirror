@@ -1,0 +1,38 @@
+name: Release
+
+# Publishes the installers (MSI + NSIS) as a draft release when a version tag
+# is pushed, e.g.:  git tag v0.9.0 && git push origin v0.9.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - run: npm ci
+        working-directory: app
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: NASMirror ${{ github.ref_name }}
+          releaseBody: See CHANGELOG.md for the changes in this version.
+          releaseDraft: true
+          prerelease: false

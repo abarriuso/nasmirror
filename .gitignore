@@ -1,0 +1,31 @@
+# Dependencies and build output
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+coverage/
+
+# Logs
+logs/
+*.log
+
+# Environment
+.env
+.env.*
+
+# Editors, tools and OS
+.vscode/
+.idea/
+.claude/
+Thumbs.db
+.DS_Store
+
+# Local notes
+TODO.md
+
+# Icons for platforms/stores NASMirror does not target (Windows-only NSIS/MSI)
+app/src-tauri/icons/Square*Logo.png
+app/src-tauri/icons/StoreLogo.png
+app/src-tauri/icons/icon.icns
+app/src-tauri/icons/icon.png
+app/public/favicon.svg
