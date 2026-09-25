@@ -131,6 +131,54 @@ by hand:
 | Backend    | Rust (tokio, clap, windows-rs, chrono)          |
 | Engines    | Robocopy (ships with Windows) / Restic          |
 
+## How it works
+
+The window is a React app inside Tauri's WebView2; everything that touches the
+disk, the network or another process runs in Rust. The same engine serves the
+window and the unattended CLI.
+
+```mermaid
+flowchart LR
+  subgraph win["Window (WebView2)"]
+    UI["React 19 + TypeScript<br/>jobs · form · live view · history"]
+  end
+  subgraph core["Rust backend (Tauri 2)"]
+    CMD["commands.rs<br/>start_job · cancel_job · profiles · history"]
+    ENG["engine::run_job"]
+    PROF[("profiles.json<br/>%APPDATA%/NASMirror")]
+    HIST[("logs + history")]
+  end
+  CLI["nasmirror.exe --job name<br/>Task Scheduler, no window"] --> ENG
+  UI -->|invoke| CMD
+  CMD --> ENG
+  ENG -->|events: phase · progress · scan · finished| UI
+  CMD --> PROF
+  ENG --> HIST
+  ENG --> WOL["Wake-on-LAN<br/>magic packet"]
+  ENG --> NET["net use<br/>password kept in memory only"]
+  ENG --> RC["robocopy.exe"]
+  ENG --> RS["restic.exe"]
+  RC & RS --> DEST[("NAS share or drive")]
+```
+
+What a job goes through, phase by phase:
+
+```mermaid
+flowchart TD
+  S([Start job]) --> W{"Wake-on-LAN set?"}
+  W -->|yes| WA["Waking target<br/>magic packet, wait for the host to answer"]
+  W -->|no| C
+  WA --> C{"Network share?"}
+  C -->|yes| CO["Connecting<br/>net use with the password typed in"]
+  C -->|no| E
+  CO --> E{"Engine"}
+  E -->|robocopy| SC["Scanning: robocopy /L<br/>preview of copies and deletions"]
+  SC --> OK{"Copy now?<br/>the CLI does not ask"}
+  OK -->|yes| CP["Copying: robocopy /MIR or add-only<br/>live speed, files and ETA"]
+  E -->|restic| RB["Copying: restic backup --json<br/>then forget --prune (retention)"]
+  CP & RB --> F["Finished: history entry and log<br/>notification if the window is in the background"]
+```
+
 ## Layout
 
 | Path                         | What lives there                                  |
