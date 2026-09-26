@@ -141,11 +141,12 @@ fn is_network_path(path: &str) -> bool {
     p.starts_with(r"\\") || p.starts_with("//")
 }
 
+/// `\\host\share` of a network path. Accepts the same spellings as
+/// `is_network_path` (`//host/share`, surrounding spaces), so every path it
+/// treats as network also gets its share connected and its host woken.
 fn share_root(path: &str) -> Option<String> {
-    if !path.starts_with("\\\\") {
-        return None;
-    }
-    let rest = &path[2..];
+    let path = path.trim().replace('/', "\\");
+    let rest = path.strip_prefix(r"\\")?;
     let mut parts = rest.splitn(3, '\\');
     let host = parts.next()?;
     let share = parts.next()?;
@@ -180,7 +181,11 @@ pub async fn run_job(
 ) -> JobResult {
     let started = Instant::now();
     let job_id = ctx.job_id.clone();
-    let profile = req.profile;
+    let mut profile = req.profile;
+    // Paths come as typed in the form: stray spaces around them would make a
+    // local folder "not exist" and hide a network share from `share_root`.
+    profile.source = profile.source.trim().to_string();
+    profile.destination = profile.destination.trim().to_string();
     let dry_run = req.dry_run;
 
     macro_rules! finish {
@@ -829,6 +834,49 @@ mod tests {
         assert_eq!(share_root(r"\\nas\backup").as_deref(), Some(r"\\nas\backup"));
         assert_eq!(share_root(r"\\nas"), None);
         assert_eq!(share_root(r"D:\backups"), None);
+    }
+
+    #[test]
+    fn share_root_accepts_every_network_spelling() {
+        // Whatever `is_network_path` accepts must yield a share, or a job with
+        // credentials would skip the connection.
+        for path in ["//nas/backup/photos", r"  \\nas\backup\photos ", r"\\nas/backup"] {
+            assert!(is_network_path(path), "{path:?}");
+            assert_eq!(share_root(path).as_deref(), Some(r"\\nas\backup"), "{path:?}");
+        }
+        assert_eq!(share_root("C:/data"), None);
+    }
+
+    #[tokio::test]
+    async fn paths_are_trimmed_before_validating() {
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let src = base.join("source");
+        std::fs::create_dir_all(&src).unwrap();
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Spaces".into(),
+            source: format!("  {}  ", src.display()),
+            destination: format!(" {} ", base.join("dest").display()),
+            mode: types::CopyMode::Accumulate,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: Default::default(),
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: true,
+        };
+        let logs = base.join("logs");
+        let result = run_job(&JobContext::new("j1".into()), request, &logs, |_| {}).await;
+        // Whatever robocopy then does, the source must have been found.
+        let error = result.error.unwrap_or_default();
+        assert!(!error.contains("does not exist"), "{error}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
