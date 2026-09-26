@@ -2,6 +2,19 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- Network paths written as `//nas/share` or with spaces around them now get
+  the job's credentials and Wake-on-LAN, like `\\nas\share`; paths are
+  trimmed before validating.
+- A `profiles.json` that cannot be read (held open by another program, no
+  permission) is reported as an error instead of being overwritten with just
+  the job being saved. A corrupt file is set aside with a timestamp.
+- Restic exit code 3 (snapshot created, some files unreadable) is reported
+  as "Finished with warnings" instead of "Backup failed"; retention is
+  skipped for that run.
+
 ## [0.9.0] - 2026-09-24
 
 First public release of NASMirror, a **Tauri 2 + React + Rust** desktop app.

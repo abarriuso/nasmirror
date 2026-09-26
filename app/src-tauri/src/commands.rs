@@ -17,8 +17,8 @@ pub struct JobRegistry {
 const EVENT_CHANNEL: &str = "nasmirror://job";
 
 #[tauri::command]
-pub fn list_profiles() -> Vec<Profile> {
-    profiles::load_profiles()
+pub fn list_profiles() -> Result<Vec<Profile>, String> {
+    profiles::load_profiles().map_err(|e| format!("could not read the saved jobs: {e}"))
 }
 
 #[tauri::command]

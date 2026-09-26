@@ -116,7 +116,7 @@ by hand:
 | Code | Meaning                                                             |
 |------|---------------------------------------------------------------------|
 | 0    | Copy succeeded, or nothing to do                                    |
-| 1    | The copy failed, or it could not connect                            |
+| 1    | The copy failed, it could not connect, or the saved jobs could not be read |
 | 2    | Cancelled                                                           |
 | 3    | Job not found                                                       |
 | 4    | Finished with warnings (attribute differences)                      |
