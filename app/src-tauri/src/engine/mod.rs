@@ -774,24 +774,41 @@ async fn run_restic_job(
             elapsed_secs: start.elapsed().as_secs_f64(),
         };
     }
-    if !status.success() {
+    let last_stderr = stderr_tail.iter().rev().map(|l| l.trim()).find(|l| !l.is_empty());
+    let exit = restic::classify_backup_exit(status.code());
+    if exit == restic::BackupExit::Failed {
         return JobResult {
             outcome: Outcome::Failed,
             summary: summary_out,
-            error: Some(match stderr_tail.iter().rev().find(|l| !l.trim().is_empty()) {
-                Some(last) => format!("restic exited with code {:?}: {}", status.code(), last.trim()),
+            error: Some(match last_stderr {
+                Some(last) => format!("restic exited with code {:?}: {last}", status.code()),
                 None => format!("restic exited with code {:?}", status.code()),
             }),
             log_path: log_path_str,
             elapsed_secs: start.elapsed().as_secs_f64(),
         };
     }
-    let outcome = match &summary {
-        Some(s) if s.files_new == 0 && s.files_changed == 0 => Outcome::NoChanges,
-        _ => Outcome::Success,
+    let incomplete = exit == restic::BackupExit::Incomplete;
+    let (outcome, warning) = if incomplete {
+        let warning = match last_stderr {
+            Some(last) => format!("some files could not be read, so the snapshot is incomplete: {last}"),
+            None => "some files could not be read, so the snapshot is incomplete (see the log)".into(),
+        };
+        (Outcome::SuccessWithMismatches, Some(warning))
+    } else {
+        let outcome = match &summary {
+            Some(s) if s.files_new == 0 && s.files_changed == 0 => Outcome::NoChanges,
+            _ => Outcome::Success,
+        };
+        (outcome, None)
     };
 
-    if !dry_run {
+    if incomplete {
+        // Retention keeps the newest snapshot of each day, week and month, so
+        // an incomplete one could push out a complete one: wait for a
+        // complete run.
+        let _ = writeln!(log_file, "[forget --prune skipped: the snapshot is incomplete]");
+    } else if !dry_run {
         if let Err(e) = restic::forget_and_prune(
             &repo,
             &password,
@@ -809,7 +826,7 @@ async fn run_restic_job(
     JobResult {
         outcome,
         summary: summary_out,
-        error: None,
+        error: warning,
         log_path: log_path_str,
         elapsed_secs: start.elapsed().as_secs_f64(),
     }
