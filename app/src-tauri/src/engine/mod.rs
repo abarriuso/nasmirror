@@ -500,6 +500,7 @@ async fn run_copy(
 
     let stdout = child.stdout.take().ok_or("robocopy produced no output")?;
     let mut lines = console::ConsoleLines::new(stdout);
+    let parser = robocopy::LineParser::new(&profile.destination);
 
     let mut log_file = std::fs::File::create(log_path)
         .map(std::io::BufWriter::new)
@@ -534,13 +535,15 @@ async fn run_copy(
                 if tail.len() > 80 {
                     tail.remove(0);
                 }
-                match robocopy::parse_line(&line) {
+                match parser.parse(&line) {
                     robocopy::RcLine::File { bytes, path } => {
                         bytes_done += bytes;
                         files_done += 1;
                         current_file = path;
                     }
-                    robocopy::RcLine::ExtraDeleted => {}
+                    // Deleted (mirror) or left alone (add-only): not part of
+                    // the bytes being copied.
+                    robocopy::RcLine::Extra => {}
                     robocopy::RcLine::Other(_) => {}
                 }
             }
