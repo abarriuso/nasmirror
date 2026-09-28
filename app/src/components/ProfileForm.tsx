@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { CopyMode, Engine, Profile } from '../types'
 import { emptyRestic, newProfile } from '../types'
+import { formatList, parseList } from '../format'
 import { open } from '@tauri-apps/plugin-dialog'
 
 interface Props {
@@ -35,11 +36,29 @@ const ENGINE_INFO: Record<Engine, { label: string; result: string }> = {
   },
 }
 
+/**
+ * A number field's value as a whole number within [min, max]. The backend
+ * takes unsigned integers (anything else fails the save), and robocopy
+ * rejects /MT above 128.
+ */
+function wholeNumber(value: string, min: number, max = 1_000_000): number {
+  const n = Math.round(Number(value))
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : min
+}
+
 export function ProfileForm({ initial, onCancel, onSave }: Props) {
   const [profile, setProfile] = useState<Profile>(initial ?? newProfile())
   const [needsCreds, setNeedsCreds] = useState(!!initial?.credentials)
   const [needsWol, setNeedsWol] = useState(!!initial?.wake_on_lan)
   const [showAdvanced, setShowAdvanced] = useState(false)
+  // The exclusion fields keep the text as typed: rebuilding it from the
+  // parsed list on every keystroke would swallow the space between entries.
+  const [excludeDirsText, setExcludeDirsText] = useState(() =>
+    formatList(profile.advanced.exclude_dirs),
+  )
+  const [excludeFilesText, setExcludeFilesText] = useState(() =>
+    formatList(profile.advanced.exclude_files),
+  )
 
   const canSave = profile.name.trim() && profile.source.trim() && profile.destination.trim()
 
@@ -158,7 +177,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               onChange={(e) =>
                 setProfile((p) => ({
                   ...p,
-                  restic: { ...p.restic, keep_daily: Number(e.target.value) },
+                  restic: { ...p.restic, keep_daily: wholeNumber(e.target.value, 0) },
                 }))
               }
             />
@@ -172,7 +191,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               onChange={(e) =>
                 setProfile((p) => ({
                   ...p,
-                  restic: { ...p.restic, keep_weekly: Number(e.target.value) },
+                  restic: { ...p.restic, keep_weekly: wholeNumber(e.target.value, 0) },
                 }))
               }
             />
@@ -186,7 +205,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               onChange={(e) =>
                 setProfile((p) => ({
                   ...p,
-                  restic: { ...p.restic, keep_monthly: Number(e.target.value) },
+                  restic: { ...p.restic, keep_monthly: wholeNumber(e.target.value, 0) },
                 }))
               }
             />
@@ -268,7 +287,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
                   min={1}
                   max={128}
                   value={profile.advanced.threads}
-                  onChange={(e) => setAdv('threads', Number(e.target.value))}
+                  onChange={(e) => setAdv('threads', wholeNumber(e.target.value, 1, 128))}
                 />
               </label>
               <label>
@@ -277,7 +296,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
                   type="number"
                   min={0}
                   value={profile.advanced.retries}
-                  onChange={(e) => setAdv('retries', Number(e.target.value))}
+                  onChange={(e) => setAdv('retries', wholeNumber(e.target.value, 0))}
                 />
               </label>
               <label>
@@ -286,7 +305,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
                   type="number"
                   min={0}
                   value={profile.advanced.wait_secs}
-                  onChange={(e) => setAdv('wait_secs', Number(e.target.value))}
+                  onChange={(e) => setAdv('wait_secs', wholeNumber(e.target.value, 0))}
                 />
               </label>
               <label className="field--checkbox">
@@ -308,17 +327,23 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               <label>
                 Exclude folders
                 <input
-                  placeholder="Thumbs.db .git node_modules"
-                  value={profile.advanced.exclude_dirs.join(' ')}
-                  onChange={(e) => setAdv('exclude_dirs', e.target.value.split(/\s+/).filter(Boolean))}
+                  placeholder='.git node_modules "System Volume Information"'
+                  value={excludeDirsText}
+                  onChange={(e) => {
+                    setExcludeDirsText(e.target.value)
+                    setAdv('exclude_dirs', parseList(e.target.value))
+                  }}
                 />
               </label>
               <label>
                 Exclude files
                 <input
-                  placeholder="*.tmp *.log desktop.ini"
-                  value={profile.advanced.exclude_files.join(' ')}
-                  onChange={(e) => setAdv('exclude_files', e.target.value.split(/\s+/).filter(Boolean))}
+                  placeholder="*.tmp *.log desktop.ini Thumbs.db"
+                  value={excludeFilesText}
+                  onChange={(e) => {
+                    setExcludeFilesText(e.target.value)
+                    setAdv('exclude_files', parseList(e.target.value))
+                  }}
                 />
               </label>
           </div>

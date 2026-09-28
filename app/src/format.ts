@@ -37,3 +37,21 @@ export function formatEtaRange(secondsLow: number, secondsHigh: number): string 
   const hi = fmt(secondsHigh)
   return lo === hi ? lo : `${lo}–${hi}`
 }
+
+/**
+ * Splits a list typed as entries separated by spaces. An entry that contains
+ * spaces goes in double quotes: `.git "System Volume Information"`.
+ */
+export function parseList(text: string): string[] {
+  const items: string[] = []
+  for (const m of text.matchAll(/"([^"]*)"?|(\S+)/g)) {
+    const item = (m[1] ?? m[2]).trim()
+    if (item) items.push(item)
+  }
+  return items
+}
+
+/** The text `parseList` reads back as `items`. */
+export function formatList(items: string[]): string {
+  return items.map((item) => (/\s/.test(item) ? `"${item}"` : item)).join(' ')
+}
