@@ -119,7 +119,7 @@ by hand:
 | 1    | The copy failed, it could not connect, or the saved jobs could not be read |
 | 2    | Cancelled                                                           |
 | 3    | Job not found                                                       |
-| 4    | Finished with warnings (attribute differences)                      |
+| 4    | Finished with warnings (robocopy: attribute differences; restic: some files could not be read) |
 | 5    | The job needs a password (network or restic) and cannot run headless |
 
 ## Built with
