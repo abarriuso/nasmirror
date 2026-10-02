@@ -162,6 +162,24 @@ pub fn start_backup(
     cmd.spawn().map_err(map_spawn_error)
 }
 
+/// How `restic backup` ended, from its exit code (restic docs, "Exit status
+/// codes"): 0 = snapshot created; 3 = snapshot created, but some source files
+/// could not be read, so it is incomplete; anything else = no snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupExit {
+    Complete,
+    Incomplete,
+    Failed,
+}
+
+pub fn classify_backup_exit(code: Option<i32>) -> BackupExit {
+    match code {
+        Some(0) => BackupExit::Complete,
+        Some(3) => BackupExit::Incomplete,
+        _ => BackupExit::Failed,
+    }
+}
+
 pub struct StatusUpdate {
     pub bytes_done: u64,
     pub bytes_total: u64,
@@ -304,6 +322,18 @@ mod tests {
             Err(ResticError::Failed(msg)) => assert!(msg.contains("already locked")),
             _ => panic!("expected Failed"),
         }
+    }
+
+    #[test]
+    fn backup_exit_codes() {
+        assert_eq!(classify_backup_exit(Some(0)), BackupExit::Complete);
+        // Unreadable source files: the snapshot exists, but is incomplete.
+        assert_eq!(classify_backup_exit(Some(3)), BackupExit::Incomplete);
+        assert_eq!(classify_backup_exit(Some(1)), BackupExit::Failed);
+        assert_eq!(classify_backup_exit(Some(12)), BackupExit::Failed);
+        assert_eq!(classify_backup_exit(Some(130)), BackupExit::Failed);
+        // Killed, no exit code.
+        assert_eq!(classify_backup_exit(None), BackupExit::Failed);
     }
 
     #[test]

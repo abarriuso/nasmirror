@@ -41,7 +41,8 @@ export function ResultsPanel({ result, onClose, onOpenLog }: Props) {
     <div className={`results-panel results-panel--${info.tone}`}>
       <div className="results-panel__icon" role="img" aria-label={info.title}>{info.icon}</div>
       <h2>{info.title}</h2>
-      {result.outcome === 'success_with_mismatches' && (
+      {/* Robocopy's meaning of "warnings"; restic explains its own in `error`. */}
+      {result.outcome === 'success_with_mismatches' && result.summary?.engine !== 'restic' && (
         <p className="results-panel__hint">
           Some files had different attributes or permissions. The data itself was copied correctly.
           Check the log for details.

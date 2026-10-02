@@ -13,12 +13,17 @@ use super::types::{AdvancedOptions, CopyMode, RobocopySummary};
 /// include `/XX`: in mirror mode robocopy must report (and count) the files it
 /// will delete from the destination, otherwise a job whose only work is
 /// deletions would be reported as "no changes" and never run.
+///
+/// `/NC` drops the file class ("New File", "*EXTRA File"), which is localized;
+/// `/FP` keeps full paths, which is how `LineParser` tells the destination's
+/// extra files apart from the files being copied.
 pub fn common_args(mode: CopyMode, adv: &AdvancedOptions) -> Vec<String> {
     let mut args = vec![
         "/BYTES".into(),
         "/NP".into(),
         "/NC".into(),
         "/NDL".into(),
+        "/FP".into(),
         format!("/R:{}", adv.retries),
         format!("/W:{}", adv.wait_secs),
     ];
@@ -60,37 +65,61 @@ pub fn copy_only_args(adv: &AdvancedOptions) -> Vec<String> {
     args
 }
 
-/// A robocopy file line with `/BYTES /NP /NC /NDL`: tab, size in bytes, tab,
-/// file path.
+/// A robocopy file line with `/BYTES /NP /NC /NDL /FP`: tab, size in bytes,
+/// tab, full path. An extra folder in the destination has size -1.
 static FILE_LINE_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
 fn file_line_re() -> &'static regex_lite::Regex {
-    FILE_LINE_RE.get_or_init(|| regex_lite::Regex::new(r"^\s*(\d+)\t(.+)$").unwrap())
-}
-
-/// Mirror-mode deletion line: `*EXTRA File` / `*EXTRA Dir` followed by size and path.
-static EXTRA_LINE_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
-fn extra_line_re() -> &'static regex_lite::Regex {
-    EXTRA_LINE_RE.get_or_init(|| regex_lite::Regex::new(r"^\*EXTRA\s+\S+").unwrap())
+    FILE_LINE_RE.get_or_init(|| regex_lite::Regex::new(r"^\s*(-?\d+)\t(.+)$").unwrap())
 }
 
 pub enum RcLine {
-    File { bytes: u64, path: String },
-    ExtraDeleted,
+    /// A file robocopy copies (or, in a scan, would copy).
+    File {
+        bytes: u64,
+        path: String,
+    },
+    /// A file or folder that only exists in the destination. Mirror mode
+    /// deletes it; add-only mode just lists it.
+    Extra,
     Other(String),
 }
 
-pub fn parse_line(line: &str) -> RcLine {
-    if let Some(caps) = file_line_re().captures(line) {
-        let bytes: u64 = caps[1].parse().unwrap_or(0);
-        return RcLine::File {
-            bytes,
-            path: caps[2].trim().to_string(),
+/// Classifies robocopy's output lines for one job.
+///
+/// With `/NC` a destination-only file ("*EXTRA File") is printed exactly like
+/// a file to copy, so the path is what tells them apart: robocopy prints it
+/// under the destination (resolved like `GetFullPathName`: `/` turned into
+/// `\`, `..` resolved, the case kept as typed), while files to copy come from
+/// the source. `validate_paths` guarantees that neither folder contains the
+/// other.
+pub struct LineParser {
+    /// Lower-case destination with a trailing `\`.
+    dst_prefix: String,
+}
+
+impl LineParser {
+    pub fn new(dst: &str) -> Self {
+        Self {
+            dst_prefix: format!("{}\\", super::normalize(&super::lexical_normalize(dst))),
+        }
+    }
+
+    pub fn parse(&self, line: &str) -> RcLine {
+        let Some(caps) = file_line_re().captures(line) else {
+            return RcLine::Other(line.to_string());
         };
+        let path = caps[2].trim();
+        if path.to_lowercase().starts_with(&self.dst_prefix) {
+            return RcLine::Extra;
+        }
+        match caps[1].parse::<u64>() {
+            Ok(bytes) => RcLine::File {
+                bytes,
+                path: path.to_string(),
+            },
+            Err(_) => RcLine::Other(line.to_string()),
+        }
     }
-    if extra_line_re().is_match(line.trim_start()) {
-        return RcLine::ExtraDeleted;
-    }
-    RcLine::Other(line.to_string())
 }
 
 fn spawn_robocopy(src: &str, dst: &str, mode_flag: &str, args: &[String]) -> std::io::Result<Child> {
@@ -131,6 +160,7 @@ pub async fn scan(
     let mut child = spawn_robocopy(src, dst, mode.robocopy_flag(), &args)?;
     let stdout = child.stdout.take().expect("stdout piped");
     let mut reader = ConsoleLines::new(stdout);
+    let parser = LineParser::new(dst);
 
     let mut files_to_copy = 0u64;
     let mut bytes_to_copy = 0u64;
@@ -151,13 +181,14 @@ pub async fn scan(
             },
             Err(_) => continue,
         };
-        match parse_line(&line) {
+        match parser.parse(&line) {
             RcLine::File { bytes, .. } => {
                 files_to_copy += 1;
                 bytes_to_copy += bytes;
             }
-            RcLine::ExtraDeleted => files_to_delete += 1,
-            RcLine::Other(_) => {}
+            // Without /PURGE robocopy lists extras but leaves them alone.
+            RcLine::Extra if mode == CopyMode::Mirror => files_to_delete += 1,
+            RcLine::Extra | RcLine::Other(_) => {}
         }
     }
     // A code >= 8 means robocopy could not read the source or destination.
@@ -308,9 +339,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Lines as printed by a real robocopy with /BYTES /NP /NC /NDL /FP.
     #[test]
     fn parse_line_file() {
-        match parse_line("\t\t        12345\tC:\\data\\photo.jpg") {
+        let parser = LineParser::new(r"D:\mirror");
+        match parser.parse("\t  \t\t   12345\tC:\\data\\photo.jpg") {
             RcLine::File { bytes, path } => {
                 assert_eq!(bytes, 12345);
                 assert_eq!(path, "C:\\data\\photo.jpg");
@@ -321,15 +354,62 @@ mod tests {
 
     #[test]
     fn parse_line_extra_and_other() {
+        // With /NC an extra file looks like a file to copy: only its path,
+        // under the destination, gives it away. An extra folder has size -1.
+        let parser = LineParser::new(" d:/Mirror/ ");
         assert!(matches!(
-            parse_line("\t\t*EXTRA File \t\t  100\told.txt"),
-            RcLine::ExtraDeleted
+            parser.parse("\t  \t\t       2\tD:\\mirror\\old.txt"),
+            RcLine::Extra
+        ));
+        assert!(matches!(
+            parser.parse("\t      -1\tD:\\MIRROR\\olddir\\"),
+            RcLine::Extra
+        ));
+        // A sibling that shares the prefix is not the destination.
+        assert!(matches!(
+            parser.parse("\t  \t\t       2\tD:\\mirror2\\new.txt"),
+            RcLine::File { bytes: 2, .. }
         ));
         // Localized (Spanish) robocopy header line.
         assert!(matches!(
-            parse_line("   Origen : C:\\data\\"),
+            parser.parse("   Origen : C:\\data\\"),
             RcLine::Other(_)
         ));
+    }
+
+    /// Runs the real robocopy against a destination with extra files: they
+    /// must count as deletions in mirror mode, be ignored in add-only mode,
+    /// and never be taken for files to copy.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn scan_tells_extras_from_copies() {
+        let base = std::env::temp_dir().join(format!("nasmirror-scan-{}", uuid::Uuid::new_v4()));
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(dst.join("olddir")).unwrap();
+        std::fs::write(src.join("new.txt"), "1234").unwrap();
+        std::fs::write(dst.join("extra.txt"), "12").unwrap();
+        std::fs::write(dst.join("olddir").join("y.txt"), "12").unwrap();
+        let (src_s, dst_s) = (src.display().to_string(), dst.display().to_string());
+        let adv = AdvancedOptions::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        let mirror = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((mirror.files_to_copy, mirror.bytes_to_copy), (1, 4));
+        // extra.txt, olddir and olddir\y.txt
+        assert_eq!(mirror.files_to_delete, 3);
+
+        let add_only = scan(&src_s, &dst_s, CopyMode::Accumulate, &adv, cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((add_only.files_to_copy, add_only.bytes_to_copy), (1, 4));
+        assert_eq!(add_only.files_to_delete, 0);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

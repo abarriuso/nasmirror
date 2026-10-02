@@ -8,9 +8,9 @@ use clap::Parser;
 /// With no arguments, opens the main window. With `--job <name>`, runs that
 /// saved job without a window and exits; add `--dry-run` to only scan.
 ///
-/// Exit codes: 0 success (or nothing to copy), 1 failure or connection error,
-/// 2 cancelled, 3 job not found, 4 completed with mismatches,
-/// 5 the job needs a password and cannot run without the window.
+/// Exit codes: 0 success (or nothing to copy), 1 failure, connection error or
+/// unreadable saved jobs, 2 cancelled, 3 job not found, 4 completed with
+/// mismatches, 5 the job needs a password and cannot run without the window.
 #[derive(Parser, Debug)]
 #[command(name = "nasmirror", version)]
 struct Cli {
@@ -48,9 +48,16 @@ fn run_headless(name: &str, dry_run: bool) -> i32 {
     };
 
     rt.block_on(async move {
-        let Some(profile) = app_lib::profiles::find_profile(name) else {
-            eprintln!("Job not found: '{name}'. Use the same name you gave it in the window.");
-            return 3;
+        let profile = match app_lib::profiles::find_profile(name) {
+            Ok(Some(profile)) => profile,
+            Ok(None) => {
+                eprintln!("Job not found: '{name}'. Use the same name you gave it in the window.");
+                return 3;
+            }
+            Err(e) => {
+                eprintln!("Could not read the saved jobs: {e}");
+                return 1;
+            }
         };
         if profile.credentials.is_some() {
             // Passwords are never stored in the profile, so a headless job

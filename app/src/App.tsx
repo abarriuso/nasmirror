@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { api, onJobEvent } from './api'
 import type { JobEvent, JobPhase, JobResult, Profile } from './types'
 import { ProfileForm } from './components/ProfileForm'
@@ -214,7 +214,8 @@ export default function App() {
     setJob(emptyJobState())
     lastBytesRef.current = null
     setBusy(true)
-    pendingContext.current = { profile, password, resticPassword, forReal: true }
+    const context = { profile, password, resticPassword, forReal: true }
+    pendingContext.current = context
     activeJobIdRef.current = null
     try {
       const jobId = await api.startJob({
@@ -223,6 +224,10 @@ export default function App() {
         restic_password: resticPassword || null,
         dry_run: false,
       })
+      // A job that fails at once (a missing source, say) can deliver
+      // `finished` before startJob returns: its result is already on screen
+      // and must not be replaced by a progress view that never ends.
+      if (pendingContext.current !== context) return
       activeJobIdRef.current = jobId
       setView({ kind: 'job', profile, jobId })
     } catch (e: unknown) {
@@ -363,6 +368,22 @@ function ProfileList({
   const [password, setPassword] = useState('')
   const [resticPassword, setResticPassword] = useState('')
 
+  const closePasswords = () => {
+    setRunningPasswordFor(null)
+    setPassword('')
+    setResticPassword('')
+  }
+  const runWithPasswords = (p: Profile) => {
+    if (busy) return
+    onRun(p, password, resticPassword)
+    closePasswords()
+  }
+  // Enter runs the job from either password field; Escape backs out.
+  const passwordKeys = (p: Profile) => (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') runWithPasswords(p)
+    else if (e.key === 'Escape') closePasswords()
+  }
+
   return (
     <div className="profile-list">
       <div className="profile-list__toolbar">
@@ -412,6 +433,7 @@ function ProfileList({
                       placeholder="Network password"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
+                      onKeyDown={passwordKeys(p)}
                     />
                   )}
                   {p.engine === 'restic' && (
@@ -421,26 +443,10 @@ function ProfileList({
                       placeholder="Encryption password"
                       value={resticPassword}
                       onChange={(e) => setResticPassword(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          onRun(p, password, resticPassword)
-                          setRunningPasswordFor(null)
-                          setPassword('')
-                          setResticPassword('')
-                        }
-                      }}
+                      onKeyDown={passwordKeys(p)}
                     />
                   )}
-                  <button
-                    className="primary"
-                    disabled={busy}
-                    onClick={() => {
-                      onRun(p, password, resticPassword)
-                      setRunningPasswordFor(null)
-                      setPassword('')
-                      setResticPassword('')
-                    }}
-                  >
+                  <button className="primary" disabled={busy} onClick={() => runWithPasswords(p)}>
                     {p.engine === 'restic' ? 'Back up' : 'Preview'}
                   </button>
                 </>

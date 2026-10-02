@@ -2,6 +2,33 @@
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- Network paths written as `//nas/share` or with spaces around them now get
+  the job's credentials and Wake-on-LAN, like `\\nas\share`; paths are
+  trimmed before validating.
+- A `profiles.json` that cannot be read (held open by another program, no
+  permission) is reported as an error instead of being overwritten with just
+  the job being saved. A corrupt file is set aside with a timestamp.
+- Restic exit code 3 (snapshot created, some files unreadable) is reported
+  as "Finished with warnings" instead of "Backup failed"; retention is
+  skipped for that run.
+- The robocopy preview counted files that exist only in the destination as
+  files to copy, so the mirror-mode deletion warning never showed and an
+  add-only job with extra files in the destination never reported "no
+  changes". They now count as deletions in mirror mode, are ignored in
+  add-only mode, and no longer inflate the progress bar.
+- The exclusion fields swallowed the space between entries, so only one
+  folder or file pattern could be typed. Entries with spaces go in quotes.
+- Number fields outside what robocopy and the job file accept (negative,
+  decimals, more than 128 threads) are kept in range instead of failing the
+  save or the copy.
+- A job that failed at once (e.g. a missing source) could leave the window
+  on an endless progress view instead of its result.
+- Enter in the network password field starts the job; Escape closes the
+  password prompt.
+
 ## [0.9.0] - 2026-09-24
 
 First public release of NASMirror, a **Tauri 2 + React + Rust** desktop app.

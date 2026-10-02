@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatDuration, formatEtaRange, formatSpeed } from './format'
+import { formatBytes, formatDuration, formatEtaRange, formatList, formatSpeed, parseList } from './format'
 
 describe('formatBytes', () => {
   it('uses whole bytes below 1 KB', () => {
@@ -80,5 +80,30 @@ describe('formatEtaRange', () => {
 
   it('avoids a rounded "0 min" on very short stretches', () => {
     expect(formatEtaRange(20, 40)).toBe('<1 min–1 min')
+  })
+})
+
+describe('parseList', () => {
+  it('splits on any run of spaces', () => {
+    expect(parseList('  .git   node_modules ')).toEqual(['.git', 'node_modules'])
+    expect(parseList('')).toEqual([])
+  })
+
+  it('keeps a quoted entry with spaces whole', () => {
+    expect(parseList('.git "System Volume Information" *.tmp')).toEqual([
+      '.git',
+      'System Volume Information',
+      '*.tmp',
+    ])
+  })
+
+  it('reads a quote still being typed up to the end', () => {
+    expect(parseList('.git "System Vol')).toEqual(['.git', 'System Vol'])
+  })
+
+  it('round-trips with formatList', () => {
+    const items = ['.git', 'System Volume Information', '$RECYCLE.BIN']
+    expect(formatList(items)).toBe('.git "System Volume Information" $RECYCLE.BIN')
+    expect(parseList(formatList(items))).toEqual(items)
   })
 })
