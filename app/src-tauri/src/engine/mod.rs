@@ -156,6 +156,17 @@ fn share_root(path: &str) -> Option<String> {
     Some(format!("\\\\{host}\\{share}"))
 }
 
+/// The host to wait for after Wake-on-LAN when the job does not name one: the
+/// server of the network share, whichever side it is on (a NAS backed up to a
+/// USB drive is the source). Empty if neither path is a share, which makes
+/// `wake_and_wait` fall back to a fixed grace period.
+fn wol_host_guess(profile: &Profile) -> String {
+    share_root(&profile.destination)
+        .or_else(|| share_root(&profile.source))
+        .and_then(|s| wol::guess_host_from_share(&s))
+        .unwrap_or_default()
+}
+
 pub struct JobContext {
     pub job_id: String,
     pub cancel: Arc<AtomicBool>,
@@ -230,12 +241,10 @@ pub async fn run_job(
             job_id: job_id.clone(),
             phase: JobPhase::WakingTarget,
         });
-        let host = if wol.host.is_empty() {
-            share_root(&profile.destination)
-                .and_then(|s| wol::guess_host_from_share(&s))
-                .unwrap_or_default()
+        let host = if wol.host.trim().is_empty() {
+            wol_host_guess(&profile)
         } else {
-            wol.host.clone()
+            wol.host.trim().to_string()
         };
         if let Err(e) = wol::wake_and_wait(&wol.mac, &host, wol.timeout_secs, ctx.cancel.clone()).await {
             let outcome = if matches!(e, wol::WolError::Cancelled) {
@@ -792,7 +801,7 @@ async fn run_restic_job(
         };
     }
     let incomplete = exit == restic::BackupExit::Incomplete;
-    let (outcome, warning) = if incomplete {
+    let (mut outcome, mut warning) = if incomplete {
         let warning = match last_stderr {
             Some(last) => format!("some files could not be read, so the snapshot is incomplete: {last}"),
             None => "some files could not be read, so the snapshot is incomplete (see the log)".into(),
@@ -822,6 +831,12 @@ async fn run_restic_job(
         .await
         {
             let _ = writeln!(log_file, "[forget --prune failed: {e}]");
+            // The snapshot is safe, but old versions are piling up: say so
+            // instead of reporting a clean run while the repository grows.
+            outcome = Outcome::SuccessWithMismatches;
+            warning = Some(format!(
+                "the new version was saved, but old versions could not be cleaned up (retention): {e}"
+            ));
         }
     }
     let _ = log_file.flush();
@@ -865,6 +880,25 @@ mod tests {
             assert_eq!(share_root(path).as_deref(), Some(r"\\nas\backup"), "{path:?}");
         }
         assert_eq!(share_root("C:/data"), None);
+    }
+
+    #[test]
+    fn wol_host_comes_from_whichever_side_is_a_share() {
+        let profile = |source: &str, destination: &str| -> Profile {
+            serde_json::from_value(serde_json::json!({
+                "id": "p1",
+                "name": "WoL",
+                "source": source,
+                "destination": destination,
+                "mode": "mirror",
+            }))
+            .unwrap()
+        };
+        assert_eq!(wol_host_guess(&profile(r"C:\data", r"\\nas\backup\data")), "nas");
+        // A NAS backed up to a local drive: the source is what needs waking.
+        assert_eq!(wol_host_guess(&profile(r"\\nas\photos", r"E:\photos")), "nas");
+        assert_eq!(wol_host_guess(&profile("//nas2/photos", r"E:\photos")), "nas2");
+        assert_eq!(wol_host_guess(&profile(r"C:\data", r"E:\data")), "");
     }
 
     #[tokio::test]

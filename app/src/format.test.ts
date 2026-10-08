@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatDuration, formatEtaRange, formatList, formatSpeed, parseList } from './format'
+import { formatBytes, formatDuration, formatEtaRange, formatList, formatSpeed, isValidMac, parseList } from './format'
 
 describe('formatBytes', () => {
   it('uses whole bytes below 1 KB', () => {
@@ -105,5 +105,19 @@ describe('parseList', () => {
     const items = ['.git', 'System Volume Information', '$RECYCLE.BIN']
     expect(formatList(items)).toBe('.git "System Volume Information" $RECYCLE.BIN')
     expect(parseList(formatList(items))).toEqual(items)
+  })
+})
+
+describe('isValidMac', () => {
+  it('accepts the separators the backend accepts', () => {
+    expect(isValidMac('AA:BB:CC:DD:EE:FF')).toBe(true)
+    expect(isValidMac('aa-bb-cc-dd-ee-ff')).toBe(true)
+    expect(isValidMac(' aabbccddeeff ')).toBe(true)
+  })
+
+  it('rejects empty, short and non-hex values', () => {
+    expect(isValidMac('')).toBe(false)
+    expect(isValidMac('AA:BB:CC')).toBe(false)
+    expect(isValidMac('AA:BB:CC:DD:EE:GG')).toBe(false)
   })
 })

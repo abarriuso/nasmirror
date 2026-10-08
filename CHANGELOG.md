@@ -28,6 +28,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on an endless progress view instead of its result.
 - Enter in the network password field starts the job; Escape closes the
   password prompt.
+- Wake-on-LAN with no host set now waits for the NAS when it is the
+  **source** (e.g. a NAS backed up to a USB drive), not only when it is the
+  destination; before, the job only waited a fixed few seconds and could
+  start before the NAS was up.
+- A restic retention run (`forget --prune`) that fails is reported as
+  "Finished with warnings" with the reason, instead of only in the log.
+- The job form no longer saves Wake-on-LAN without a valid MAC address, or
+  network credentials without a user name (every run would fail), and keeps
+  a custom Wake-on-LAN timeout when the MAC or host is edited.
+- The copy mode (mirror / add only) is hidden for restic jobs, which ignore
+  it, instead of showing a misleading "Mirror" badge.
 
 ## [0.9.0] - 2026-09-24
 

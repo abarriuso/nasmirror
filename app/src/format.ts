@@ -55,3 +55,11 @@ export function parseList(text: string): string[] {
 export function formatList(items: string[]): string {
   return items.map((item) => (/\s/.test(item) ? `"${item}"` : item)).join(' ')
 }
+
+/**
+ * Whether `mac` reads as a MAC address the backend accepts: 12 hex digits,
+ * with any separators (`AA:BB:..`, `aa-bb-..`, `aabb..`).
+ */
+export function isValidMac(mac: string): boolean {
+  return /^[0-9a-f]{12}$/i.test(mac.replace(/[^0-9a-z]/gi, ''))
+}
