@@ -415,9 +415,12 @@ function ProfileList({
                 {p.source} → {p.destination}
               </span>
               <div className="profile-card__badges">
-                <span className={`profile-card__mode profile-card__mode--${p.mode}`}>
-                  {p.mode === 'mirror' ? 'Mirror' : 'Add only'}
-                </span>
+                {/* Restic ignores the copy mode. */}
+                {p.engine === 'robocopy' && (
+                  <span className={`profile-card__mode profile-card__mode--${p.mode}`}>
+                    {p.mode === 'mirror' ? 'Mirror' : 'Add only'}
+                  </span>
+                )}
                 <span className={`profile-card__mode profile-card__mode--${p.engine}`}>
                   {p.engine === 'restic' ? 'Versioned' : 'Direct copy'}
                 </span>

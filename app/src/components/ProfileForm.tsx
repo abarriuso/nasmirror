@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { CopyMode, Engine, Profile } from '../types'
 import { emptyRestic, newProfile } from '../types'
-import { formatList, parseList } from '../format'
+import { formatList, isValidMac, parseList } from '../format'
 import { open } from '@tauri-apps/plugin-dialog'
 
 interface Props {
@@ -60,7 +60,15 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
     formatList(profile.advanced.exclude_files),
   )
 
-  const canSave = profile.name.trim() && profile.source.trim() && profile.destination.trim()
+  // An empty user or MAC would only fail later, on every run.
+  const credsMissing = needsCreds && !profile.credentials?.user.trim()
+  const macInvalid = needsWol && !isValidMac(profile.wake_on_lan?.mac ?? '')
+  const canSave =
+    profile.name.trim() &&
+    profile.source.trim() &&
+    profile.destination.trim() &&
+    !credsMissing &&
+    !macInvalid
 
   const pickFolder = async (which: 'source' | 'destination') => {
     const picked = await open({ directory: true, multiple: false })
@@ -123,24 +131,6 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
           </button>
         </div>
       </label>
-
-      <fieldset className="mode-picker">
-        <legend>Copy mode</legend>
-        {(Object.keys(MODE_INFO) as CopyMode[]).map((mode) => (
-          <label key={mode} className={`mode-option mode-option--${MODE_INFO[mode].tone}`}>
-            <input
-              type="radio"
-              name="mode"
-              checked={profile.mode === mode}
-              onChange={() => setProfile((p) => ({ ...p, mode }))}
-            />
-            <div>
-              <strong>{MODE_INFO[mode].label}</strong>
-              <p>{MODE_INFO[mode].result}</p>
-            </div>
-          </label>
-        ))}
-      </fieldset>
 
       <fieldset className="mode-picker">
         <legend>Copy method</legend>
@@ -213,6 +203,28 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
         </div>
       )}
 
+      {/* Restic keeps every version and never deletes from the repository
+            on its own, so the copy mode does not apply to it. */}
+      {profile.engine === 'robocopy' && (
+        <fieldset className="mode-picker">
+          <legend>Copy mode</legend>
+          {(Object.keys(MODE_INFO) as CopyMode[]).map((mode) => (
+            <label key={mode} className={`mode-option mode-option--${MODE_INFO[mode].tone}`}>
+              <input
+                type="radio"
+                name="mode"
+                checked={profile.mode === mode}
+                onChange={() => setProfile((p) => ({ ...p, mode }))}
+              />
+              <div>
+                <strong>{MODE_INFO[mode].label}</strong>
+                <p>{MODE_INFO[mode].result}</p>
+              </div>
+            </label>
+          ))}
+        </fieldset>
+      )}
+
       <label className="field field--checkbox">
         <input type="checkbox" checked={needsCreds} onChange={(e) => setNeedsCreds(e.target.checked)} />
         <span>The network destination asks for a user name and password</span>
@@ -229,7 +241,11 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               }))
             }
           />
-          <span className="field-hint">The password is asked for on every run: it is never stored.</span>
+          <span className="field-hint">
+            {credsMissing
+              ? 'Enter the user name for the network share.'
+              : 'The password is asked for on every run: it is never stored.'}
+          </span>
         </div>
       )}
 
@@ -245,7 +261,11 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
             onChange={(e) =>
               setProfile((p) => ({
                 ...p,
-                wake_on_lan: { mac: e.target.value, host: p.wake_on_lan?.host ?? '', timeout_secs: 120 },
+                wake_on_lan: {
+                  mac: e.target.value,
+                  host: p.wake_on_lan?.host ?? '',
+                  timeout_secs: p.wake_on_lan?.timeout_secs ?? 120,
+                },
               }))
             }
           />
@@ -255,10 +275,17 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
             onChange={(e) =>
               setProfile((p) => ({
                 ...p,
-                wake_on_lan: { mac: p.wake_on_lan?.mac ?? '', host: e.target.value, timeout_secs: 120 },
+                wake_on_lan: {
+                  mac: p.wake_on_lan?.mac ?? '',
+                  host: e.target.value,
+                  timeout_secs: p.wake_on_lan?.timeout_secs ?? 120,
+                },
               }))
             }
           />
+          {macInvalid && (
+            <span className="field-hint">Enter the MAC address of the device to wake, e.g. AA:BB:CC:DD:EE:FF.</span>
+          )}
         </div>
       )}
 
