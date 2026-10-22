@@ -15,6 +15,8 @@ interface Props {
   onCancel: () => void
 }
 
+const ETA_AFTER_MS = 10_000
+
 /** Average speed over the samples from the last `windowMs`. */
 function recentAvgSpeed(samples: SpeedSample[], windowMs: number): number {
   if (samples.length === 0) return 0
@@ -41,7 +43,11 @@ export const JobView = memo(function JobView({
   const remainingBytes = Math.max(0, bytesTotal - bytesDone)
   const etaLow = speed60s > 0 ? remainingBytes / speed60s : 0
   const etaHigh = speed10s > 0 ? remainingBytes / speed10s : etaLow
-  const showEta = phase === 'copying' && bytesDone > 0 && (etaLow > 0 || etaHigh > 0)
+  // The first seconds are no basis for an estimate: a run of small files
+  // moves few bytes and once read as "313 h left".
+  const copyingForMs = samples.length > 1 ? samples[samples.length - 1].tMs - samples[0].tMs : 0
+  const showEta =
+    phase === 'copying' && bytesDone > 0 && copyingForMs >= ETA_AFTER_MS && (etaLow > 0 || etaHigh > 0)
 
   return (
     <div className="job-view">

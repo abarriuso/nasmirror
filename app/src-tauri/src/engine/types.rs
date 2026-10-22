@@ -142,6 +142,29 @@ pub struct JobRequest {
     /// Scan only (robocopy /L): nothing is copied or deleted.
     #[serde(default)]
     pub dry_run: bool,
+    /// What the preview just found, sent back when the user confirms it. The
+    /// copy then starts at once instead of scanning the whole tree again,
+    /// which on a large source over the network can take minutes.
+    #[serde(default)]
+    pub preview: Option<ScanTotals>,
+}
+
+/// What a robocopy scan (`/L`) found to do.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ScanTotals {
+    pub files_to_copy: u64,
+    pub bytes_to_copy: u64,
+    pub files_to_delete: u64,
+    /// Folders missing from the destination, empty ones included: with no
+    /// file inside them they show up nowhere else.
+    #[serde(default)]
+    pub dirs_to_create: u64,
+}
+
+impl ScanTotals {
+    pub fn is_empty(&self) -> bool {
+        self.files_to_copy == 0 && self.files_to_delete == 0 && self.dirs_to_create == 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -232,9 +255,11 @@ pub enum JobEvent {
     },
     ScanResult {
         job_id: String,
-        files_to_copy: u64,
-        bytes_to_copy: u64,
-        files_to_delete: u64,
+        #[serde(flatten)]
+        totals: ScanTotals,
+        /// Parts of the tree robocopy could not read (exit code 8): the rest
+        /// can still be copied.
+        warning: Option<String>,
     },
     Progress(ProgressSample),
     LogLine {

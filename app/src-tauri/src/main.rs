@@ -87,6 +87,7 @@ fn run_headless(name: &str, dry_run: bool) -> i32 {
             password: None,
             restic_password: None,
             dry_run,
+            preview: None,
         };
         let log_dir = app_lib::profiles::log_dir();
         let result = app_lib::engine::run_job(&ctx, request, &log_dir, |_event| {}).await;

@@ -28,6 +28,32 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on an endless progress view instead of its result.
 - Enter in the network password field starts the job; Escape closes the
   password prompt.
+- **Delete** (job or history entry) and **Stop** never asked for
+  confirmation: the dialog plugin replaces `window.confirm` with a function
+  that always reads as "yes". They now ask in a native dialog, and anything
+  but an explicit OK keeps the job, entry or copy.
+- One unreadable folder anywhere in the source (robocopy exit code 8 while
+  scanning) aborted the whole job before copying anything. The rest is now
+  copied; the preview warns, and the result names what could not be read.
+- A failed copy only said "Backup failed": the result and the history now
+  carry robocopy's own explanation (e.g. the file in use and by what), and a
+  failed scan says why instead of "exited with code 16".
+- A new empty folder, when it was the only change, ended as "no changes"
+  and was never created. The preview counts new folders too.
+- A path that is not a full path (`\nas\share`, one backslash short, or a
+  relative `backup`) was accepted and resolved against the current drive or
+  the app's folder. It is now rejected before anything runs.
+- Confirming the preview scanned the whole tree a second time; the copy now
+  reuses what the preview found and starts at once.
+- A cancelled copy was recorded as 0 files and 0 B; it now shows what was
+  copied before stopping.
+- In mirror mode the result listed the deleted extras as "Files only in the
+  destination"; it now says they were deleted.
+- The time left showed nonsense (hundreds of hours) during the first
+  seconds of a copy of small files; it now waits for 10 s of data.
+- The job form saved a network login with no user name and a Wake-on-LAN
+  setting with no valid MAC, and kept spaces around the paths. It now says
+  what is missing, and the job list shows the destination on its own line.
 
 ## [0.9.0] - 2026-09-24
 

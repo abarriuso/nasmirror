@@ -51,6 +51,17 @@ export interface JobRequest {
   password?: string | null
   restic_password?: string | null
   dry_run: boolean
+  /** What the preview found: the confirmed copy starts without scanning again. */
+  preview?: ScanTotals | null
+}
+
+/** What a robocopy scan found to do. */
+export interface ScanTotals {
+  files_to_copy: number
+  bytes_to_copy: number
+  files_to_delete: number
+  /** Folders missing from the destination, empty ones included. */
+  dirs_to_create: number
 }
 
 export type JobPhase =
@@ -133,13 +144,12 @@ export interface ProgressSample {
 
 export type JobEvent =
   | { type: 'phase'; job_id: string; phase: JobPhase }
-  | {
+  | ({
       type: 'scan_result'
       job_id: string
-      files_to_copy: number
-      bytes_to_copy: number
-      files_to_delete: number
-    }
+      /** Parts of the source robocopy could not read; the rest can still be copied. */
+      warning: string | null
+    } & ScanTotals)
   | ({ type: 'progress' } & ProgressSample)
   | { type: 'log_line'; job_id: string; line: string }
   | { type: 'retry_warning'; job_id: string; file: string; attempt: number }

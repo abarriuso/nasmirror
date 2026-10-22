@@ -60,7 +60,19 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
     formatList(profile.advanced.exclude_files),
   )
 
-  const canSave = profile.name.trim() && profile.source.trim() && profile.destination.trim()
+  // Wake-on-LAN reads the hex digits of the MAC, whatever separates them.
+  const macDigits = (profile.wake_on_lan?.mac ?? '').replace(/[^0-9a-f]/gi, '').length
+  const problem = !profile.name.trim()
+    ? 'Give the job a name.'
+    : !profile.source.trim()
+      ? 'Choose the source folder.'
+      : !profile.destination.trim()
+        ? 'Choose the destination folder.'
+        : needsCreds && !profile.credentials?.user.trim()
+          ? 'Enter the network user name, or untick the user name and password option.'
+          : needsWol && macDigits !== 12
+            ? 'Enter the MAC address of the destination (12 hex digits, e.g. AA:BB:CC:DD:EE:FF).'
+            : null
 
   const pickFolder = async (which: 'source' | 'destination') => {
     const picked = await open({ directory: true, multiple: false })
@@ -73,12 +85,18 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
     setProfile((p) => ({ ...p, advanced: { ...p.advanced, [key]: value } }))
 
   const submit = () => {
+    if (problem) return
+    const wol = profile.wake_on_lan
     const toSave: Profile = {
       ...profile,
-      credentials: needsCreds ? { user: profile.credentials?.user ?? '', password: '' } : null,
-      wake_on_lan: needsWol
-        ? profile.wake_on_lan ?? { mac: '', host: '', timeout_secs: 120 }
-        : null,
+      name: profile.name.trim(),
+      source: profile.source.trim(),
+      destination: profile.destination.trim(),
+      credentials: needsCreds ? { user: profile.credentials?.user.trim() ?? '', password: '' } : null,
+      wake_on_lan:
+        needsWol && wol
+          ? { mac: wol.mac.trim(), host: wol.host.trim(), timeout_secs: wol.timeout_secs }
+          : null,
     }
     onSave(toSave)
   }
@@ -351,10 +369,11 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
       </div>
 
       <div className="form-actions">
+        {problem && <span className="field-hint">{problem}</span>}
         <button type="button" onClick={onCancel}>
           Cancel
         </button>
-        <button type="button" className="primary" disabled={!canSave} onClick={submit}>
+        <button type="button" className="primary" disabled={!!problem} onClick={submit}>
           Save job
         </button>
       </div>

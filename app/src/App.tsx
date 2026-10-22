@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { api, onJobEvent } from './api'
-import type { JobEvent, JobPhase, JobResult, Profile } from './types'
+import type { JobEvent, JobPhase, JobResult, Profile, ScanTotals } from './types'
 import { ProfileForm } from './components/ProfileForm'
 import { JobView } from './components/JobView'
 import { PHASE_LABEL } from './phases'
 import { ResultsPanel } from './components/ResultsPanel'
 import { HistoryPanel } from './components/HistoryPanel'
 import { notifyFinished } from './notify'
+import { askToConfirm, showError } from './dialogs'
 import type { SpeedSample } from './components/SpeedChart'
 import { formatBytes } from './format'
 import './App.css'
@@ -22,12 +23,11 @@ type View =
       password: string
       resticPassword: string
       jobId: string
-      filesToCopy: number
-      bytesToCopy: number
-      filesToDelete: number
+      scan: ScanTotals
+      warning: string | null
     }
   | { kind: 'job'; profile: Profile; jobId: string }
-  | { kind: 'result'; result: JobResult }
+  | { kind: 'result'; result: JobResult; mirror: boolean }
 
 interface JobState {
   phase: JobPhase
@@ -64,7 +64,7 @@ export default function App() {
     api
       .listProfiles()
       .then(setProfiles)
-      .catch((e) => alert(errorMessage(e)))
+      .catch((e) => showError(errorMessage(e)))
       .finally(() => setLoadingProfiles(false))
     const unlisten = onJobEvent(handleJobEvent)
     return () => {
@@ -90,9 +90,13 @@ export default function App() {
           filesTotal: event.files_to_copy,
         }))
         pendingScan.current = {
-          filesToCopy: event.files_to_copy,
-          bytesToCopy: event.bytes_to_copy,
-          filesToDelete: event.files_to_delete,
+          scan: {
+            files_to_copy: event.files_to_copy,
+            bytes_to_copy: event.bytes_to_copy,
+            files_to_delete: event.files_to_delete,
+            dirs_to_create: event.dirs_to_create,
+          },
+          warning: event.warning,
         }
         break
       case 'progress': {
@@ -127,7 +131,7 @@ export default function App() {
     }
   }
 
-  const pendingScan = useRef<{ filesToCopy: number; bytesToCopy: number; filesToDelete: number } | null>(null)
+  const pendingScan = useRef<{ scan: ScanTotals; warning: string | null } | null>(null)
   const pendingContext = useRef<{
     profile: Profile
     password: string
@@ -139,6 +143,7 @@ export default function App() {
     const ctx = pendingContext.current
     if (!ctx) return
     setBusy(false)
+    const mirror = ctx.profile.mode === 'mirror'
     if (!ctx.forReal) {
       pendingContext.current = null
       if (result.outcome === 'cancelled') {
@@ -149,26 +154,28 @@ export default function App() {
       // The scan only leads to the preview if it found changes; "no changes"
       // or any error is shown directly as the result.
       if (result.outcome !== 'success') {
-        setView({ kind: 'result', result })
+        setView({ kind: 'result', result, mirror })
         return
       }
-      const scan = pendingScan.current ?? { filesToCopy: 0, bytesToCopy: 0, filesToDelete: 0 }
+      const found = pendingScan.current ?? {
+        scan: { files_to_copy: 0, bytes_to_copy: 0, files_to_delete: 0, dirs_to_create: 0 },
+        warning: null,
+      }
       setView({
         kind: 'preview',
         profile: ctx.profile,
         password: ctx.password,
         resticPassword: ctx.resticPassword,
         jobId: activeJobIdRef.current ?? '',
-        filesToCopy: scan.filesToCopy,
-        bytesToCopy: scan.bytesToCopy,
-        filesToDelete: scan.filesToDelete,
+        scan: found.scan,
+        warning: found.warning,
       })
       return
     }
     pendingContext.current = null
     activeJobIdRef.current = null
     void notifyFinished(ctx.profile.name, result)
-    setView({ kind: 'result', result })
+    setView({ kind: 'result', result, mirror })
   }
 
   async function startPreview(profile: Profile, password: string, resticPassword: string) {
@@ -194,7 +201,7 @@ export default function App() {
     } catch (e: unknown) {
       setBusy(false)
       setView({ kind: 'list' })
-      alert(errorMessage(e))
+      showError(errorMessage(e))
     }
   }
 
@@ -205,11 +212,13 @@ export default function App() {
 
   async function confirmAndRun(fromPreview?: { profile: Profile; password: string; resticPassword: string }) {
     let profile: Profile, password: string, resticPassword: string
+    let preview: ScanTotals | null = null
     if (fromPreview) {
       ;({ profile, password, resticPassword } = fromPreview)
     } else {
       if (view.kind !== 'preview') return
       ;({ profile, password, resticPassword } = view)
+      preview = view.scan
     }
     setJob(emptyJobState())
     lastBytesRef.current = null
@@ -223,6 +232,7 @@ export default function App() {
         password: password || null,
         restic_password: resticPassword || null,
         dry_run: false,
+        preview,
       })
       // A job that fails at once (a missing source, say) can deliver
       // `finished` before startJob returns: its result is already on screen
@@ -232,14 +242,15 @@ export default function App() {
       setView({ kind: 'job', profile, jobId })
     } catch (e: unknown) {
       setBusy(false)
-      alert(errorMessage(e))
+      showError(errorMessage(e))
     }
   }
 
   async function cancelJob() {
     if (view.kind !== 'job') return
-    if (!window.confirm('Stop the copy in progress? Files already copied are kept.')) return
-    await api.cancelJob(view.jobId)
+    const { jobId } = view
+    if (!(await askToConfirm('Stop the copy in progress? Files already copied are kept.', 'Stop'))) return
+    await api.cancelJob(jobId)
   }
 
   async function saveProfile(profile: Profile) {
@@ -247,16 +258,17 @@ export default function App() {
       setProfiles(await api.saveProfile(profile))
       setView({ kind: 'list' })
     } catch (e: unknown) {
-      alert(`Could not save the job: ${errorMessage(e)}`)
+      showError(`Could not save the job: ${errorMessage(e)}`)
     }
   }
 
-  async function deleteProfile(id: string) {
-    if (!window.confirm('Delete this job? Copied files are not removed.')) return
+  async function deleteProfile(profile: Profile) {
+    if (!(await askToConfirm(`Delete the job "${profile.name}"? Copied files are not removed.`, 'Delete')))
+      return
     try {
-      setProfiles(await api.deleteProfile(id))
+      setProfiles(await api.deleteProfile(profile.id))
     } catch (e: unknown) {
-      alert(`Could not delete the job: ${errorMessage(e)}`)
+      showError(`Could not delete the job: ${errorMessage(e)}`)
     }
   }
 
@@ -311,9 +323,8 @@ export default function App() {
 
         {view.kind === 'preview' && (
           <PreviewPanel
-            filesToCopy={view.filesToCopy}
-            bytesToCopy={view.bytesToCopy}
-            filesToDelete={view.filesToDelete}
+            scan={view.scan}
+            warning={view.warning}
             source={view.profile.source}
             destination={view.profile.destination}
             mirror={view.profile.mode === 'mirror'}
@@ -338,6 +349,7 @@ export default function App() {
         {view.kind === 'result' && (
           <ResultsPanel
             result={view.result}
+            mirror={view.mirror}
             onClose={() => setView({ kind: 'list' })}
             onOpenLog={() => api.openLogDir()}
           />
@@ -361,7 +373,7 @@ function ProfileList({
   loading: boolean
   onNew: () => void
   onEdit: (p: Profile) => void
-  onDelete: (id: string) => void
+  onDelete: (p: Profile) => void
   onRun: (p: Profile, password: string, resticPassword: string) => void
 }) {
   const [runningPasswordFor, setRunningPasswordFor] = useState<Profile | null>(null)
@@ -411,8 +423,13 @@ function ProfileList({
           <li key={p.id} className="profile-card">
             <div className="profile-card__main">
               <strong>{p.name}</strong>
-              <span className="profile-card__paths">
-                {p.source} → {p.destination}
+              {/* One line each: on a single line a long source pushed the
+                  destination out of sight. */}
+              <span className="profile-card__paths" title={p.source}>
+                {p.source}
+              </span>
+              <span className="profile-card__paths" title={p.destination}>
+                → {p.destination}
               </span>
               <div className="profile-card__badges">
                 <span className={`profile-card__mode profile-card__mode--${p.mode}`}>
@@ -466,7 +483,7 @@ function ProfileList({
                 </button>
               )}
               <button onClick={() => onEdit(p)}>Edit</button>
-              <button className="danger" onClick={() => onDelete(p.id)}>
+              <button className="danger" onClick={() => onDelete(p)}>
                 Delete
               </button>
             </div>
@@ -478,29 +495,35 @@ function ProfileList({
 }
 
 function PreviewPanel({
-  filesToCopy,
-  bytesToCopy,
-  filesToDelete,
+  scan,
+  warning,
   source,
   destination,
   mirror,
   onCancel,
   onConfirm,
 }: {
-  filesToCopy: number
-  bytesToCopy: number
-  filesToDelete: number
+  scan: ScanTotals
+  warning: string | null
   source: string
   destination: string
   mirror: boolean
   onCancel: () => void
   onConfirm: () => void
 }) {
+  const filesToDelete = scan.files_to_delete
   return (
     <div className="preview-panel">
       <h2>Before copying</h2>
       <p>
-        <strong>{filesToCopy}</strong> files will be copied ({formatBytes(bytesToCopy)}):
+        <strong>{scan.files_to_copy}</strong> files will be copied ({formatBytes(scan.bytes_to_copy)})
+        {scan.dirs_to_create > 0 && (
+          <>
+            {' '}
+            and <strong>{scan.dirs_to_create}</strong> new folders created
+          </>
+        )}
+        :
       </p>
       <div className="preview-panel__route">
         <code className="preview-panel__path">{source}</code>
@@ -513,7 +536,7 @@ function PreviewPanel({
           <strong> deleted</strong> from the destination because they no longer exist in the source.
         </p>
       )}
-      {filesToCopy === 0 && filesToDelete === 0 && <p>Nothing to copy.</p>}
+      {warning && <p className="preview-panel__danger">⚠ {warning}</p>}
       <div className="form-actions">
         <button onClick={onCancel}>Cancel</button>
         <button className={mirror && filesToDelete > 0 ? 'danger' : 'primary'} onClick={onConfirm}>

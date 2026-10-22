@@ -3,6 +3,8 @@ import { formatBytes, formatDuration } from '../format'
 
 interface Props {
   result: JobResult
+  /** Mirror mode deletes the destination's extra files instead of leaving them. */
+  mirror: boolean
   onClose: () => void
   onOpenLog: () => void
 }
@@ -24,10 +26,10 @@ const OUTCOME_INFO: Record<
 }
 
 /** Turns robocopy's exit-code bitmask into plain language. */
-function explainRobocopyExit(code: number): string {
+function explainRobocopyExit(code: number, mirror: boolean): string {
   const bits: string[] = []
   if (code & 1) bits.push('files copied')
-  if (code & 2) bits.push('extra files in the destination')
+  if (code & 2) bits.push(mirror ? 'extra files deleted from the destination' : 'extra files in the destination')
   if (code & 4) bits.push('files with attribute differences')
   if (code & 8) bits.push('some files failed')
   if (code & 16) bits.push('fatal error')
@@ -35,7 +37,7 @@ function explainRobocopyExit(code: number): string {
   return bits.join(', ')
 }
 
-export function ResultsPanel({ result, onClose, onOpenLog }: Props) {
+export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
   const info = OUTCOME_INFO[result.outcome]
   return (
     <div className={`results-panel results-panel--${info.tone}`}>
@@ -68,7 +70,7 @@ export function ResultsPanel({ result, onClose, onOpenLog }: Props) {
             )}
             {result.summary.files_extra > 0 && (
               <tr>
-                <td>Files only in the destination</td>
+                <td>{mirror ? 'Deleted from the destination' : 'Files only in the destination'}</td>
                 <td>{result.summary.files_extra}</td>
               </tr>
             )}
@@ -82,7 +84,7 @@ export function ResultsPanel({ result, onClose, onOpenLog }: Props) {
             </tr>
             <tr>
               <td>Result</td>
-              <td>{explainRobocopyExit(result.summary.exit_code)}</td>
+              <td>{explainRobocopyExit(result.summary.exit_code, mirror)}</td>
             </tr>
           </tbody>
         </table>

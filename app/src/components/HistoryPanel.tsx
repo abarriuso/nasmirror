@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { askToConfirm } from '../dialogs'
 import { formatBytes, formatDuration } from '../format'
 import type { HistoryEntry, Outcome } from '../types'
 
@@ -40,7 +41,7 @@ export function HistoryPanel({ onClose }: Props) {
   }
 
   const remove = async (entry: HistoryEntry) => {
-    if (!window.confirm('Delete this history entry? It does not affect the copied files.'))
+    if (!(await askToConfirm('Delete this history entry? It does not affect the copied files.', 'Delete')))
       return
     try {
       setEntries(await api.deleteHistoryEntry(entry.id))

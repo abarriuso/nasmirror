@@ -24,6 +24,8 @@ pub enum PathError {
     SourceMissing(String),
     #[error("choose a destination folder")]
     DestinationEmpty,
+    #[error("\"{0}\" is not a full path: write it with its drive (D:\\Backups) or as a network share (\\\\nas\\share)")]
+    NotAbsolute(String),
     #[error("source and destination are the same folder")]
     SameSourceAndDestination,
     #[error("the destination is inside the source folder: that would copy forever")]
@@ -116,11 +118,16 @@ fn resolve_for_compare(path: &str) -> String {
 /// so touching it could block on a sleeping NAS or fail for lack of a login.
 /// `run_job` checks it once the share is reachable.
 pub fn validate_paths(source: &str, destination: &str) -> Result<(), PathError> {
-    if !is_network_path(source) && !Path::new(source).is_dir() {
-        return Err(PathError::SourceMissing(source.to_string()));
-    }
     if destination.trim().is_empty() {
         return Err(PathError::DestinationEmpty);
+    }
+    for path in [source, destination] {
+        if !is_absolute(path) {
+            return Err(PathError::NotAbsolute(path.trim().to_string()));
+        }
+    }
+    if !is_network_path(source) && !Path::new(source).is_dir() {
+        return Err(PathError::SourceMissing(source.to_string()));
     }
     let src_n = resolve_for_compare(source);
     let dst_n = resolve_for_compare(destination);
@@ -139,6 +146,19 @@ pub fn validate_paths(source: &str, destination: &str) -> Result<(), PathError> 
 fn is_network_path(path: &str) -> bool {
     let p = path.trim_start();
     p.starts_with(r"\\") || p.starts_with("//")
+}
+
+/// `D:\folder` or `\\host\share\folder`. Anything else is resolved by Windows
+/// against something the user never typed: `\nas\share` (one backslash short)
+/// against the root of the current drive, `backup` or `D:backup` against the
+/// app's working folder. In mirror mode that is a copy, and deletions, in an
+/// unexpected place.
+fn is_absolute(path: &str) -> bool {
+    if is_network_path(path) {
+        return share_root(path).is_some();
+    }
+    let p = path.trim().as_bytes();
+    p.len() >= 3 && p[0].is_ascii_alphabetic() && p[1] == b':' && matches!(p[2], b'\\' | b'/')
 }
 
 /// `\\host\share` of a network path. Accepts the same spellings as
@@ -350,58 +370,75 @@ pub async fn run_job(
     }
 
     // ── Scan (list-only pass, /L) ────────────────────────────────
-    emit(JobEvent::Phase {
-        job_id: job_id.clone(),
-        phase: JobPhase::Scanning,
-    });
-    let scan = match robocopy::scan(
-        &profile.source,
-        &profile.destination,
-        profile.mode,
-        &profile.advanced,
-        ctx.cancel.clone(),
-    )
-    .await
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            if let Some(share) = &share {
-                netuse::disconnect(share);
-            }
-            finish!(
-                Outcome::Cancelled,
-                None,
-                None,
-                log_path.display().to_string()
-            );
+    // A copy confirmed from the preview reuses what the preview found: its
+    // numbers only drive the progress bar, and robocopy itself decides what
+    // to copy.
+    let preview = req.preview.filter(|_| !dry_run);
+    let scan = if let Some(totals) = preview {
+        robocopy::ScanOutcome {
+            totals,
+            warning: None,
         }
-        Err(e) => {
-            if let Some(share) = &share {
-                netuse::disconnect(share);
+    } else {
+        emit(JobEvent::Phase {
+            job_id: job_id.clone(),
+            phase: JobPhase::Scanning,
+        });
+        match robocopy::scan(
+            &profile.source,
+            &profile.destination,
+            profile.mode,
+            &profile.advanced,
+            ctx.cancel.clone(),
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                if let Some(share) = &share {
+                    netuse::disconnect(share);
+                }
+                finish!(
+                    Outcome::Cancelled,
+                    None,
+                    None,
+                    log_path.display().to_string()
+                );
             }
-            finish!(
-                Outcome::Failed,
-                None,
-                Some(format!("could not scan the copy: {e}")),
-                log_path.display().to_string()
-            );
+            Err(e) => {
+                if let Some(share) = &share {
+                    netuse::disconnect(share);
+                }
+                finish!(
+                    Outcome::Failed,
+                    None,
+                    Some(format!("could not scan the copy: {e}")),
+                    log_path.display().to_string()
+                );
+            }
         }
     };
     emit(JobEvent::ScanResult {
         job_id: job_id.clone(),
-        files_to_copy: scan.files_to_copy,
-        bytes_to_copy: scan.bytes_to_copy,
-        files_to_delete: scan.files_to_delete,
+        totals: scan.totals,
+        warning: scan.warning.clone(),
     });
 
-    if scan.files_to_copy == 0 && scan.files_to_delete == 0 {
+    if scan.totals.is_empty() {
         if let Some(share) = &share {
             netuse::disconnect(share);
         }
+        // Nothing to do in what could be read: an unreadable folder is
+        // still a failure, as robocopy itself would report it.
+        let outcome = if scan.warning.is_some() {
+            Outcome::Failed
+        } else {
+            Outcome::NoChanges
+        };
         finish!(
-            Outcome::NoChanges,
+            outcome,
             None,
-            None,
+            scan.warning.clone(),
             log_path.display().to_string()
         );
     }
@@ -410,10 +447,11 @@ pub async fn run_job(
         if let Some(share) = &share {
             netuse::disconnect(share);
         }
+        // `--dry-run` has no window to show the scan's warning in.
         finish!(
             Outcome::Success,
             None,
-            None,
+            scan.warning.clone(),
             log_path.display().to_string()
         );
     }
@@ -438,8 +476,8 @@ pub async fn run_job(
     }
 
     match outcome {
-        Ok((exit_code, summary)) => {
-            let summary = summary.map(EngineSummary::Robocopy);
+        Ok((exit_code, summary, errors)) => {
+            let summary = Some(EngineSummary::Robocopy(summary));
             if ctx.cancel.load(Ordering::SeqCst) {
                 finish!(
                     Outcome::Cancelled,
@@ -449,10 +487,17 @@ pub async fn run_job(
                 );
             }
             let result_outcome = classify_exit_code(exit_code);
+            // Robocopy explains failures only in its output: without this the
+            // window would just say "failed" and leave the reason in the log.
+            let error = (result_outcome == Outcome::Failed).then(|| {
+                errors.unwrap_or_else(|| {
+                    format!("robocopy exited with code {exit_code}; the log has the details")
+                })
+            });
             finish!(
                 result_outcome,
                 summary,
-                None,
+                error,
                 log_path.display().to_string()
             );
         }
@@ -489,7 +534,7 @@ async fn run_copy(
     log_path: &Path,
     cancel: Arc<AtomicBool>,
     emit: &(impl Fn(JobEvent) + Send + Sync + 'static),
-) -> Result<(i32, Option<RobocopySummary>), String> {
+) -> Result<(i32, RobocopySummary, Option<String>), String> {
     let mut child = robocopy::start_copy(
         &profile.source,
         &profile.destination,
@@ -516,6 +561,7 @@ async fn run_copy(
     let _ = writeln!(log_file, "{}", "-".repeat(64));
 
     let mut tail: Vec<String> = Vec::new();
+    let mut errors = robocopy::ErrorLog::default();
     let mut bytes_done = 0u64;
     let mut files_done = 0u64;
     let mut current_file = String::new();
@@ -531,6 +577,7 @@ async fn run_copy(
         match next.await {
             Ok(Ok(Some(line))) => {
                 let _ = writeln!(log_file, "{line}");
+                errors.push(&line);
                 tail.push(line.clone());
                 if tail.len() > 80 {
                     tail.remove(0);
@@ -561,9 +608,9 @@ async fn run_copy(
                 job_id: job_id.to_string(),
                 at_ms: now_ms as u64,
                 bytes_done,
-                bytes_total: scan.bytes_to_copy.max(bytes_done),
+                bytes_total: scan.totals.bytes_to_copy.max(bytes_done),
                 files_done,
-                files_total: scan.files_to_copy.max(files_done),
+                files_total: scan.totals.files_to_copy.max(files_done),
                 current_file: current_file.clone(),
                 current_file_bytes_done: 0,
                 current_file_bytes_total: 0,
@@ -582,9 +629,9 @@ async fn run_copy(
         job_id: job_id.to_string(),
         at_ms: start.elapsed().as_millis() as u64,
         bytes_done,
-        bytes_total: scan.bytes_to_copy.max(bytes_done),
+        bytes_total: scan.totals.bytes_to_copy.max(bytes_done),
         files_done,
-        files_total: scan.files_to_copy.max(files_done),
+        files_total: scan.totals.files_to_copy.max(files_done),
         current_file: String::new(),
         current_file_bytes_done: 0,
         current_file_bytes_total: 0,
@@ -599,8 +646,19 @@ async fn run_copy(
     );
     let _ = log_file.flush();
 
-    let summary = robocopy::parse_summary(&tail, exit_code);
-    Ok((exit_code, summary))
+    // A cancelled (killed) robocopy prints no summary: count what this run
+    // saw finish, so the result and the history do not claim nothing was
+    // copied.
+    let summary = robocopy::parse_summary(&tail, exit_code).unwrap_or(RobocopySummary {
+        exit_code,
+        dirs_copied: 0,
+        files_copied: files_done,
+        files_failed: 0,
+        files_extra: 0,
+        bytes_copied: bytes_done,
+        bytes_failed: 0,
+    });
+    Ok((exit_code, summary, errors.summary()))
 }
 
 /// Restic counterpart of `run_copy`: same line-reading loop with cancellation
@@ -889,6 +947,7 @@ mod tests {
             password: None,
             restic_password: None,
             dry_run: true,
+            preview: None,
         };
         let logs = base.join("logs");
         let result = run_job(&JobContext::new("j1".into()), request, &logs, |_| {}).await;
@@ -934,6 +993,84 @@ mod tests {
     }
 
     #[test]
+    fn validate_paths_rejects_paths_that_are_not_full() {
+        let src = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        let src_s = src.display().to_string();
+
+        // `\nas\share` (one backslash short) would land in C:\nas\share.
+        for dst in [r"\nas\share\copy", "backup", r"D:backup", "D:", r"\\nas"] {
+            assert!(
+                matches!(validate_paths(&src_s, dst), Err(PathError::NotAbsolute(_))),
+                "{dst:?}"
+            );
+        }
+        assert!(matches!(
+            validate_paths(r"\COSAS", r"D:\mirror"),
+            Err(PathError::NotAbsolute(_))
+        ));
+        for dst in [r"D:\", "D:/mirror", r"\\nas\share", "//nas/share/copy"] {
+            assert!(validate_paths(&src_s, dst).is_ok(), "{dst:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    /// A file robocopy cannot read fails the run (exit code 8), and the
+    /// result has to say which file and why, not just "failed".
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_failed_copy_says_why() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let src = base.join("source");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("ok.txt"), "ok").unwrap();
+        std::fs::write(src.join("locked.txt"), "locked").unwrap();
+        // No sharing at all: robocopy cannot open it.
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src.join("locked.txt"))
+            .unwrap();
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Locked".into(),
+            source: src.display().to_string(),
+            destination: base.join("dest").display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: types::AdvancedOptions {
+                retries: 0,
+                wait_secs: 0,
+                ..Default::default()
+            },
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: false,
+            preview: None,
+        };
+        let result = run_job(&JobContext::new("j1".into()), request, &base.join("logs"), |_| {}).await;
+        assert_eq!(result.outcome, Outcome::Failed);
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("locked.txt"), "{error}");
+        match result.summary {
+            Some(EngineSummary::Robocopy(s)) => assert_eq!((s.files_copied, s.files_failed), (1, 1)),
+            other => panic!("expected a robocopy summary, got {other:?}"),
+        }
+
+        drop(_lock);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn validate_paths_does_not_touch_network_sources() {
         // Not checked for existence (the share may be asleep or need the
         // job's login), but still checked for nesting.
@@ -969,6 +1106,7 @@ mod tests {
             password: None,
             restic_password: None,
             dry_run: false,
+            preview: None,
         };
         let result = run_job(&JobContext::new("j1".into()), request, &log_dir, |_| {}).await;
         assert_eq!(result.outcome, Outcome::Failed);

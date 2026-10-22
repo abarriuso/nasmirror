@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 
 use super::console::ConsoleLines;
-use super::types::{AdvancedOptions, CopyMode, RobocopySummary};
+use super::types::{AdvancedOptions, CopyMode, RobocopySummary, ScanTotals};
 
 /// Flags shared by the scan (`/L`) and the actual copy. Deliberately does NOT
 /// include `/XX`: in mirror mode robocopy must report (and count) the files it
@@ -122,6 +122,66 @@ impl LineParser {
     }
 }
 
+/// `<date> <time> ERROR <code> (0x<hex>) <what it was doing> <path>`. The word
+/// ERROR is not translated; the rest of the line is.
+static ERROR_LINE_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
+fn error_line_re() -> &'static regex_lite::Regex {
+    ERROR_LINE_RE.get_or_init(|| {
+        regex_lite::Regex::new(r"\bERROR (\d+) \(0x[0-9A-Fa-f]+\) (.+)$").unwrap()
+    })
+}
+
+/// Collects the errors robocopy prints while it works, so a failed run can
+/// say why instead of just "failed": each one is an `ERROR` line followed by
+/// the system's explanation ("Access is denied."). A retried file repeats
+/// the same error, so each distinct one is kept once.
+#[derive(Default)]
+pub struct ErrorLog {
+    /// An `ERROR` line still waiting for its explanation on the next line.
+    pending: Option<String>,
+    errors: Vec<String>,
+}
+
+impl ErrorLog {
+    pub fn push(&mut self, line: &str) {
+        let line = line.trim();
+        if let Some(what) = self.pending.take() {
+            // With /MT the explanation can be missing, or another thread's
+            // line can come in between: never take a file or error line for it.
+            if line.is_empty() || error_line_re().is_match(line) || file_line_re().is_match(line) {
+                self.add(what);
+            } else {
+                self.add(format!("{what}: {line}"));
+                return;
+            }
+        }
+        if let Some(caps) = error_line_re().captures(line) {
+            self.pending = Some(caps[2].trim().to_string());
+        }
+    }
+
+    fn add(&mut self, error: String) {
+        if !self.errors.contains(&error) {
+            self.errors.push(error);
+        }
+    }
+
+    /// The first error, and how many others there were.
+    pub fn summary(&self) -> Option<String> {
+        let mut errors = self.errors.clone();
+        if let Some(what) = &self.pending {
+            if !errors.contains(what) {
+                errors.push(what.clone());
+            }
+        }
+        let first = errors.first()?;
+        Some(match errors.len() {
+            1 => first.clone(),
+            n => format!("{first} (and {} more errors, see the log)", n - 1),
+        })
+    }
+}
+
 fn spawn_robocopy(src: &str, dst: &str, mode_flag: &str, args: &[String]) -> std::io::Result<Child> {
     let mut cmd = Command::new("robocopy");
     cmd.arg(src).arg(dst).arg(mode_flag).args(args);
@@ -138,9 +198,10 @@ fn spawn_robocopy(src: &str, dst: &str, mode_flag: &str, args: &[String]) -> std
 }
 
 pub struct ScanOutcome {
-    pub files_to_copy: u64,
-    pub bytes_to_copy: u64,
-    pub files_to_delete: u64,
+    pub totals: ScanTotals,
+    /// Robocopy could not read part of the tree (exit code 8, e.g. a folder
+    /// the user has no access to). The rest can still be copied.
+    pub warning: Option<String>,
 }
 
 /// Scans with `/L` (list-only, changes nothing) to know in advance what the
@@ -165,6 +226,8 @@ pub async fn scan(
     let mut files_to_copy = 0u64;
     let mut bytes_to_copy = 0u64;
     let mut files_to_delete = 0u64;
+    let mut errors = ErrorLog::default();
+    let mut tail: Vec<String> = Vec::new();
     loop {
         if cancel.load(Ordering::SeqCst) {
             let _ = child.start_kill();
@@ -181,6 +244,7 @@ pub async fn scan(
             },
             Err(_) => continue,
         };
+        errors.push(&line);
         match parser.parse(&line) {
             RcLine::File { bytes, .. } => {
                 files_to_copy += 1;
@@ -188,23 +252,46 @@ pub async fn scan(
             }
             // Without /PURGE robocopy lists extras but leaves them alone.
             RcLine::Extra if mode == CopyMode::Mirror => files_to_delete += 1,
-            RcLine::Extra | RcLine::Other(_) => {}
+            RcLine::Extra => {}
+            RcLine::Other(line) => {
+                tail.push(line);
+                if tail.len() > 20 {
+                    tail.remove(0);
+                }
+            }
         }
     }
-    // A code >= 8 means robocopy could not read the source or destination.
-    // Without this check an empty scan would be taken as "no changes" and a
-    // scheduled task would report success without copying anything.
     let status = child.wait().await?;
     let code = status.code().unwrap_or(-1);
-    if !(0..8).contains(&code) {
-        return Err(std::io::Error::other(format!(
-            "robocopy exited with code {code} while scanning"
-        )));
+    // 16 (or no code at all) means robocopy could not get at the source or
+    // destination: an empty scan must not be taken as "no changes", or a
+    // scheduled task would report success without copying anything.
+    if !(0..16).contains(&code) {
+        return Err(std::io::Error::other(match errors.summary() {
+            Some(error) => error,
+            None => format!("robocopy exited with code {code} while scanning (fatal error)"),
+        }));
     }
+    // 8 means some files or folders could not be read. Failing the whole job
+    // over one unreadable folder would leave everything else uncopied, so the
+    // copy goes ahead and reports them.
+    let warning = (code & 8 != 0).then(|| match errors.summary() {
+        Some(error) => format!("part of the source could not be read and will not be copied: {error}"),
+        // With /NDL an unreadable folder gets no error line while scanning;
+        // the copy does print one.
+        None => "part of the source could not be read and will not be copied (the copy's log names it)".into(),
+    });
+    // With /NDL folders are not listed, so a new empty folder is only seen in
+    // the summary's "Dirs" row (Copied column).
+    let dirs_to_create = parse_summary(&tail, code).map_or(0, |s| s.dirs_copied);
     Ok(Some(ScanOutcome {
-        files_to_copy,
-        bytes_to_copy,
-        files_to_delete,
+        totals: ScanTotals {
+            files_to_copy,
+            bytes_to_copy,
+            files_to_delete,
+            dirs_to_create,
+        },
+        warning,
     }))
 }
 
@@ -398,6 +485,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let mirror = mirror.totals;
         assert_eq!((mirror.files_to_copy, mirror.bytes_to_copy), (1, 4));
         // extra.txt, olddir and olddir\y.txt
         assert_eq!(mirror.files_to_delete, 3);
@@ -405,11 +493,98 @@ mod tests {
         let add_only = scan(&src_s, &dst_s, CopyMode::Accumulate, &adv, cancel)
             .await
             .unwrap()
-            .unwrap();
+            .unwrap()
+            .totals;
         assert_eq!((add_only.files_to_copy, add_only.bytes_to_copy), (1, 4));
         assert_eq!(add_only.files_to_delete, 0);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A new empty folder is the only difference: with /NDL no line lists
+    /// it, and the job used to end as "no changes" without creating it.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn scan_counts_new_empty_folders() {
+        let base = std::env::temp_dir().join(format!("nasmirror-scan-{}", uuid::Uuid::new_v4()));
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(src.join("empty")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("a.txt"), "1234").unwrap();
+        // Copied with its timestamps, so it is already up to date.
+        std::fs::copy(src.join("a.txt"), dst.join("a.txt")).unwrap();
+        let (src_s, dst_s) = (src.display().to_string(), dst.display().to_string());
+        let adv = AdvancedOptions::default();
+        let cancel = Arc::new(AtomicBool::new(false));
+
+        for mode in [CopyMode::Mirror, CopyMode::Accumulate] {
+            let totals = scan(&src_s, &dst_s, mode, &adv, cancel.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .totals;
+            assert_eq!((totals.files_to_copy, totals.files_to_delete), (0, 0), "{mode:?}");
+            assert_eq!(totals.dirs_to_create, 1, "{mode:?}");
+        }
+
+        std::fs::create_dir_all(dst.join("empty")).unwrap();
+        let totals = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel)
+            .await
+            .unwrap()
+            .unwrap()
+            .totals;
+        assert!(totals.is_empty(), "{totals:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Lines as printed by a real Spanish robocopy with /MT: the explanation
+    // comes on the next line, and a retry repeats the same error.
+    #[test]
+    fn error_log_keeps_each_error_once_with_its_explanation() {
+        let mut log = ErrorLog::default();
+        for line in [
+            "\t  \t\t       6\tC:\\src\\locked.txt",
+            "2026/10/23 00:37:40 ERROR 32 (0x00000020) Copiando archivo C:\\src\\locked.txt",
+            "El proceso no tiene acceso al archivo porque está siendo utilizado por otro proceso.",
+            "",
+            "\t  \t\t       6\tC:\\src\\locked.txt Reintentando...",
+            "2026/10/23 00:37:41 ERROR 32 (0x00000020) Copiando archivo C:\\src\\locked.txt",
+            "El proceso no tiene acceso al archivo porque está siendo utilizado por otro proceso.",
+            "ERROR: SE SUPERÓ EL LÍMITE DE REINTENTOS.",
+        ] {
+            log.push(line);
+        }
+        assert_eq!(
+            log.summary().as_deref(),
+            Some(
+                "Copiando archivo C:\\src\\locked.txt: El proceso no tiene acceso al archivo \
+                 porque está siendo utilizado por otro proceso."
+            )
+        );
+    }
+
+    #[test]
+    fn error_log_counts_other_errors_and_survives_a_missing_explanation() {
+        let mut log = ErrorLog::default();
+        assert_eq!(log.summary(), None);
+        for line in [
+            "2026/10/23 00:50:11 ERROR 5 (0x00000005) Copying Directory C:\\src\\private\\",
+            "Access is denied.",
+            // Another thread's file line where the explanation should be.
+            "2026/10/23 00:50:12 ERROR 53 (0x00000035) Copying File C:\\src\\a.txt",
+            "\t  \t\t       1\tC:\\src\\b.txt",
+        ] {
+            log.push(line);
+        }
+        assert_eq!(
+            log.summary().as_deref(),
+            Some("Copying Directory C:\\src\\private\\: Access is denied. (and 1 more errors, see the log)")
+        );
+        // A trailing error with no explanation yet still counts.
+        let mut log = ErrorLog::default();
+        log.push("2026/10/23 00:50:12 ERROR 112 (0x00000070) Copying File D:\\big.iso");
+        assert_eq!(log.summary().as_deref(), Some("Copying File D:\\big.iso"));
     }
 
     #[test]
