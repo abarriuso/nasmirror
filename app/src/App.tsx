@@ -19,6 +19,8 @@ import { HistoryPanel } from './components/HistoryPanel'
 import { OUTCOME_BADGE } from './outcomes'
 import { notifyFinished } from './notify'
 import { askToConfirm, showError } from './dialogs'
+import { findUpdate, offerUpdate } from './updates'
+import type { Update } from '@tauri-apps/plugin-updater'
 import type { SpeedSample } from './components/SpeedChart'
 import {
   copyProgress,
@@ -105,6 +107,7 @@ export default function App() {
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [cancelling, setCancelling] = useState(false)
+  const [update, setUpdate] = useState<Update | null>(null)
   const lastBytesRef = useRef<{ atMs: number; bytes: number; items: number } | null>(null)
   const activeJobIdRef = useRef<string | null>(null)
   // Cancel pressed before startJob returned the job's id.
@@ -124,6 +127,7 @@ export default function App() {
       .catch((e) => showError(errorMessage(e)))
       .finally(() => setLoadingProfiles(false))
     refreshHistory()
+    void findUpdate().then(setUpdate)
     const unlisten = onJobEvent(handleJobEvent)
     // Closing the window ends robocopy with it (it is tied to NASMirror):
     // with a job running, ask first, and stop the job properly so its
@@ -151,6 +155,16 @@ export default function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // The update found at start is offered once, from the job list with nothing
+  // running: installing it closes the app, which would stop a copy or lose a
+  // half-filled form. Busy meanwhile, so no job starts during the download.
+  useEffect(() => {
+    if (!update || busy || view.kind !== 'list') return
+    setUpdate(null)
+    setBusy(true)
+    void offerUpdate(update).finally(() => setBusy(false))
+  }, [update, busy, view.kind])
 
   function handleJobEvent(event: JobEvent) {
     const activeJobId = activeJobIdRef.current

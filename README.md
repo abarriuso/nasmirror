@@ -211,6 +211,20 @@ irm https://raw.githubusercontent.com/abarriuso/nasmirror/main/install.ps1 | iex
 Or download the installer (`.msi` or `-setup.exe`) from the
 [Releases](https://github.com/abarriuso/nasmirror/releases) page.
 
+### Updates
+
+On start, NASMirror asks GitHub whether a newer version has been published.
+If so, it offers to install it, but only from the job list with no copy
+running; on **Update** it downloads the installer, checks its signature,
+installs it (the `-setup.exe` for the PowerShell install, the `.msi` for an
+MSI install, which asks for admin rights) and opens again. A check that
+fails (offline, no published release yet) is silent: the app simply starts
+as usual.
+
+**0.9.0 cannot update itself**: it was built before the updater. Install the
+next version once by hand (run the PowerShell line above again, or download
+the installer); from then on updates arrive on their own.
+
 ## Requirements
 
 - Windows 10 or 11 (with WebView2, which ships with Windows 11).
@@ -239,8 +253,30 @@ npm run tauri build   # MSI + NSIS installers in src-tauri/target/release/bundle
    `app/src-tauri/tauri.conf.json`, and write the changes down in
    `CHANGELOG.md`.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-3. The **Release** workflow builds the installers and creates a draft release
-   on GitHub; review it and publish it.
+3. The **Release** workflow builds the installers, signs them, and creates a
+   draft release on GitHub with the installers, their `.sig` signatures and
+   `latest.json`; review it and publish it.
+
+Installed copies read
+`https://github.com/abarriuso/nasmirror/releases/latest/download/latest.json`,
+which only points at the latest **published**, non-prerelease release: a
+draft is invisible to them until you publish it, and a prerelease never
+reaches them.
+
+Signing needs a key pair, created once:
+
+1. `npm run tauri signer generate -- -w ~/.tauri/nasmirror.key` (from `app/`),
+   with a password. Keep the private key and its password safe and out of the
+   repository: without them no update can be published that existing installs
+   accept.
+2. Paste the contents of `~/.tauri/nasmirror.key.pub` into `plugins.updater.pubkey`
+   in `app/src-tauri/tauri.conf.json`.
+3. In the repository's **Settings → Secrets and variables → Actions**, add
+   `TAURI_SIGNING_PRIVATE_KEY` (the contents of `~/.tauri/nasmirror.key`) and
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
+
+`npm run tauri build` also needs both variables set locally, since the build
+signs the installers.
 
 ## Security
 
@@ -256,7 +292,6 @@ npm run tauri build   # MSI + NSIS installers in src-tauri/target/release/bundle
 - Restoring from restic snapshots inside the app (today: `restic restore`).
 - Log rotation / a cap on the logs folder.
 - Export and import of jobs.
-- Auto-update from GitHub Releases.
 
 ## Licence
 
