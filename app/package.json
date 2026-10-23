@@ -9,6 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "tauri": "tauri",
+    "tauri:unsigned": "tauri build --config src-tauri/tauri.unsigned.conf.json",
     "test": "vitest run",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml"
   },

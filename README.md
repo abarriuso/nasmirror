@@ -244,14 +244,20 @@ npm run tauri dev     # window with hot reload
 npm run lint          # oxlint
 npm test              # frontend tests (vitest)
 npm run test:rust     # engine tests (cargo test)
-npm run tauri build   # MSI + NSIS installers in src-tauri/target/release/bundle
+npm run tauri:unsigned  # MSI + NSIS installers in src-tauri/target/release/bundle
 ```
+
+`npm run tauri:unsigned` builds the installers without the update signatures,
+so it needs no signing key; `npm run tauri build` signs them, and needs the
+key (see below).
 
 ### Publishing a version
 
 1. Bump the version in `app/package.json`, `app/src-tauri/Cargo.toml` and
    `app/src-tauri/tauri.conf.json`, and write the changes down in
-   `CHANGELOG.md`.
+   `CHANGELOG.md`. Commit and push that before tagging: the release is built
+   from the tagged commit, and one still numbered as the installed version is
+   not offered as an update.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`
 3. The **Release** workflow builds the installers, signs them, and creates a
    draft release on GitHub with the installers, their `.sig` signatures and
@@ -275,8 +281,13 @@ Signing needs a key pair, created once:
    `TAURI_SIGNING_PRIVATE_KEY` (the contents of `~/.tauri/nasmirror.key`) and
    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 
-`npm run tauri build` also needs both variables set locally, since the build
-signs the installers.
+The **Release** workflow refuses to build while `pubkey` still holds the
+placeholder: copies installed from such a release could never update. A
+copy built with `npm run tauri:unsigned` before the key was pasted has the
+placeholder too, and needs the next version installed by hand.
+
+`npm run tauri build` needs both variables set locally, since it signs the
+installers.
 
 ## Security
 

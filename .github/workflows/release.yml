@@ -26,6 +26,16 @@ jobs:
           workspaces: app/src-tauri
       - run: npm ci
         working-directory: app
+      # Installed copies only accept updates signed for the public key they
+      # were built with: a release built with the placeholder could never
+      # update itself again.
+      - name: Check the updater public key
+        shell: bash
+        run: |
+          if grep -q 'PASTE_THE_CONTENTS_OF' app/src-tauri/tauri.conf.json; then
+            echo "::error::Paste the updater public key into plugins.updater.pubkey in app/src-tauri/tauri.conf.json first (see README.md, Publishing a version)."
+            exit 1
+          fi
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
