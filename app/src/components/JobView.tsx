@@ -1,8 +1,18 @@
 import { memo } from 'react'
+import { useNow } from '../useNow'
 import type { JobPhase } from '../types'
 import { PHASE_LABEL } from '../phases'
 import { SpeedChart, type SpeedSample } from './SpeedChart'
-import { formatBytes, formatEtaRange, formatSpeed, secondsLeft } from '../format'
+import { JobSteps, type JobStep } from './JobSteps'
+import {
+  formatBytes,
+  formatCount,
+  formatElapsed,
+  formatEtaRange,
+  formatSpeed,
+  relativePath,
+  secondsLeft,
+} from '../format'
 
 interface Props {
   phase: JobPhase
@@ -12,6 +22,12 @@ interface Props {
   filesTotal: number
   currentFile: string
   samples: SpeedSample[]
+  /** What the job has done so far (connecting, copying...), with details. */
+  steps: JobStep[]
+  /** The job's source, to show the latest file from there on. */
+  source: string
+  /** Stop was confirmed and robocopy is being ended. */
+  stopping: boolean
   onCancel: () => void
 }
 
@@ -35,8 +51,13 @@ export const JobView = memo(function JobView({
   filesTotal,
   currentFile,
   samples,
+  steps,
+  source,
+  stopping,
   onCancel,
 }: Props) {
+  const startedMs = steps[0]?.startedMs
+  const now = useNow(true, 1000)
   const pct = bytesTotal > 0 ? Math.min(100, (bytesDone / bytesTotal) * 100) : 0
   const speed10s = recentAvgSpeed(samples, 10_000)
   // From the pace of files and bytes together, over the last 10 s and 60 s:
@@ -52,9 +73,10 @@ export const JobView = memo(function JobView({
         <div className="job-view__pct">{phase === 'copying' ? `${pct.toFixed(0)}%` : PHASE_LABEL[phase]}</div>
         <div className="job-view__meta">
           {phase === 'copying' && <div className="job-view__phase">{PHASE_LABEL[phase]}</div>}
-          {showEta && (
-            <div className="job-view__eta">{formatEtaRange(Math.min(...etas), Math.max(...etas))} left</div>
-          )}
+          <div className="job-view__eta">
+            {startedMs !== undefined && <>{formatElapsed(now - startedMs)} elapsed</>}
+            {showEta && <> · {formatEtaRange(Math.min(...etas), Math.max(...etas))} left</>}
+          </div>
         </div>
       </div>
 
@@ -71,20 +93,28 @@ export const JobView = memo(function JobView({
           style={{ width: `${phase === 'copying' || phase === 'done' ? pct : 0}%` }}
         />
       </div>
-      {currentFile && <div className="job-view__current-file" title={currentFile}>{currentFile}</div>}
+      {/* Robocopy names a file as it finishes it (or, with /MT, as it
+          starts): "latest" fits both. */}
+      {currentFile && (
+        <div className="job-view__current-file" title={currentFile}>
+          Latest: {relativePath(source, currentFile)}
+        </div>
+      )}
 
       <div className="job-view__stats" aria-live="polite">
         <Stat label="Transferred" value={formatBytes(bytesDone)} />
         <Stat label="Total" value={formatBytes(bytesTotal)} />
         <Stat label="Current speed" value={formatSpeed(speed10s)} />
-        <Stat label="Files" value={`${filesDone} / ${filesTotal}`} />
+        <Stat label="Files" value={`${formatCount(filesDone)} / ${formatCount(filesTotal)}`} />
       </div>
 
       <SpeedChart samples={samples} />
 
+      <JobSteps steps={steps} scan={null} source={source} />
+
       <div className="job-view__actions">
-        <button type="button" className="danger" onClick={onCancel}>
-          Stop
+        <button type="button" className="danger" disabled={stopping} onClick={onCancel}>
+          {stopping ? 'Stopping…' : 'Stop'}
         </button>
       </div>
     </div>

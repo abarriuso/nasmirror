@@ -170,6 +170,8 @@ impl ScanTotals {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobPhase {
+    /// Validating the source and destination paths.
+    Checking,
     Connecting,
     WakingTarget,
     Scanning,
@@ -252,6 +254,19 @@ pub enum JobEvent {
     Phase {
         job_id: String,
         phase: JobPhase,
+        /// What exactly this step does, for the window to show: the paths,
+        /// the share and user, the command line run.
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    /// The scan so far, a few times a second: with no changes to list,
+    /// robocopy prints nothing for minutes on a large tree.
+    ScanProgress {
+        job_id: String,
+        dirs_scanned: u64,
+        current_dir: String,
+        #[serde(flatten)]
+        totals: ScanTotals,
     },
     ScanResult {
         job_id: String,

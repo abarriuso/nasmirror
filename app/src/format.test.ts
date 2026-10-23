@@ -2,13 +2,78 @@ import { describe, expect, it } from 'vitest'
 import {
   copyProgress,
   formatBytes,
+  formatCount,
   formatDuration,
+  formatElapsed,
   formatEtaRange,
   formatList,
+  formatWhen,
   formatSpeed,
+  isFullPath,
   parseList,
+  plural,
+  relativePath,
   secondsLeft,
 } from './format'
+
+describe('formatWhen', () => {
+  const today = new Date(2026, 9, 23, 21, 0)
+  it('names today and yesterday', () => {
+    expect(formatWhen('2026-10-23 20:09:07', today)).toBe('today 20:09')
+    expect(formatWhen('2026-10-22 08:05:00', today)).toBe('yesterday 08:05')
+  })
+
+  it('gives the date otherwise, with the year only when it is not this one', () => {
+    expect(formatWhen('2026-09-28 10:55:56', today)).toBe('28 Sept 10:55')
+    expect(formatWhen('2025-12-31 23:59:59', today)).toBe('31 Dec 2025 23:59')
+    expect(formatWhen('not a date', today)).toBe('not a date')
+  })
+})
+
+describe('counts', () => {
+  it('groups thousands and picks the singular for one', () => {
+    expect(formatCount(12345)).toBe('12,345')
+    expect(plural(1, 'file')).toBe('1 file')
+    expect(plural(0, 'file')).toBe('0 files')
+    expect(plural(2048, 'file or folder', 'files or folders')).toBe('2,048 files or folders')
+  })
+})
+
+describe('formatElapsed', () => {
+  it('keeps a tenth of a second while short, then minutes and hours', () => {
+    expect(formatElapsed(420)).toBe('0.4 s')
+    expect(formatElapsed(42_900)).toBe('42 s')
+    expect(formatElapsed(185_000)).toBe('3 min 05 s')
+    expect(formatElapsed(3_720_000)).toBe('1 h 02 min')
+    expect(formatElapsed(-5)).toBe('0.0 s')
+  })
+})
+
+describe('relativePath', () => {
+  it('drops the part every path of the source shares', () => {
+    expect(relativePath('C:\\COSAS', 'C:\\COSAS\\PROYECTOS\\app\\')).toBe('…\\PROYECTOS\\app')
+    expect(relativePath('C:\\COSAS\\', 'c:\\cosas\\x')).toBe('…\\x')
+  })
+
+  it('leaves other paths whole', () => {
+    expect(relativePath('C:\\COSAS', 'C:\\COSAS2\\x')).toBe('C:\\COSAS2\\x')
+    expect(relativePath('C:\\COSAS', 'C:\\COSAS\\')).toBe('C:\\COSAS\\')
+  })
+})
+
+describe('isFullPath', () => {
+  it('takes a drive path or a network share', () => {
+    for (const p of ['D:\\', 'D:/Backups', '  C:\\COSAS ', '\\\\nas\\share', '//nas/share/x']) {
+      expect(isFullPath(p), p).toBe(true)
+    }
+  })
+
+  it('rejects what Windows would resolve against another folder', () => {
+    for (const p of ['\\nas\\share', 'backup', 'D:backup', 'D:', '\\\\nas', '']) {
+      expect(isFullPath(p), p).toBe(false)
+    }
+  })
+})
 
 describe('copyProgress', () => {
   it('averages the share of bytes and of files done', () => {

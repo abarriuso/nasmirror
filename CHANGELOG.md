@@ -4,7 +4,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- The preview and the copy show each step as it happens: checking the
+  paths, waking the NAS, connecting to the share (and as which user),
+  comparing, copying. Each has its time and the exact paths or command
+  line. While comparing, a running count of the folders checked, the folder
+  it is in and what it has found so far: a long scan over the network no
+  longer looks stuck.
+- Each job card shows its last run: when, how it ended, files, data and
+  duration.
+- The results screen names the job and its paths, gives robocopy's exit
+  code, lists the steps with their commands, and shows the run's log in
+  place.
+- The copy log starts with the exact robocopy command.
+
 ### Fixed
+- Closing NASMirror, ending its task or a crash during a scan or a copy left
+  robocopy (or restic) running on its own, unseen: still copying, or
+  deleting in mirror mode, and competing with the next run for the NAS. They
+  now end with NASMirror.
+- Cancel pressed while a scan was still starting did nothing.
+- The network password prompt has a Cancel button, besides Escape.
+- The job form rejects paths that are not full paths, and a network user
+  name on a job with no network path, before saving instead of at the next
+  run.
 - Network paths written as `//nas/share` or with spaces around them now get
   the job's credentials and Wake-on-LAN, like `\\nas\share`; paths are
   trimmed before validating.

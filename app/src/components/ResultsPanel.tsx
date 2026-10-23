@@ -1,12 +1,22 @@
-import type { JobResult } from '../types'
-import { formatBytes, formatDuration } from '../format'
+import { useState } from 'react'
+import { api } from '../api'
+import type { JobResult, Profile } from '../types'
+import { formatBytes, formatCount, formatDuration } from '../format'
+import { JobSteps, type JobStep } from './JobSteps'
 
 interface Props {
   result: JobResult
-  /** Mirror mode deletes the destination's extra files instead of leaving them. */
-  mirror: boolean
+  /** The job that ran. In mirror mode the destination's extra files are deleted. */
+  profile: Profile
+  /** What the run did, step by step, for its details. */
+  steps: JobStep[]
   onClose: () => void
-  onOpenLog: () => void
+  onOpenLogDir: () => void
+}
+
+/** The history id of a run: its log's file name without the extension. */
+function logId(logPath: string): string {
+  return (logPath.split(/[\\/]/).pop() ?? '').replace(/\.log$/i, '')
 }
 
 const OUTCOME_INFO: Record<
@@ -37,8 +47,20 @@ function explainRobocopyExit(code: number, mirror: boolean): string {
   return bits.join(', ')
 }
 
-export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
+export function ResultsPanel({ result, profile, steps, onClose, onOpenLogDir }: Props) {
   const info = OUTCOME_INFO[result.outcome]
+  const mirror = profile.mode === 'mirror'
+  const [log, setLog] = useState<string | null>(null)
+  // Only a run that got as far as copying wrote a log.
+  const hasLog = result.summary !== null
+  const toggleLog = async () => {
+    if (log !== null) return setLog(null)
+    try {
+      setLog(await api.readLog(logId(result.log_path)))
+    } catch (e: unknown) {
+      setLog(e instanceof Error ? e.message : String(e))
+    }
+  }
   // A stopped robocopy prints no summary: the backend counts the files it saw
   // finish, but the folders and an exit code of its own are not known.
   const stopped = result.outcome === 'cancelled'
@@ -46,6 +68,12 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
     <div className={`results-panel results-panel--${info.tone}`}>
       <div className="results-panel__icon" role="img" aria-label={info.title}>{info.icon}</div>
       <h2>{info.title}</h2>
+      <p className="results-panel__job">
+        <strong>{profile.name}</strong>
+        <span className="results-panel__route" title={`${profile.source} → ${profile.destination}`}>
+          {profile.source} → {profile.destination}
+        </span>
+      </p>
       {/* Robocopy's meaning of "warnings"; restic explains its own in `error`. */}
       {result.outcome === 'success_with_mismatches' && result.summary?.engine !== 'restic' && (
         <p className="results-panel__hint">
@@ -60,23 +88,23 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
             {!stopped && (
               <tr>
                 <td>Folders copied</td>
-                <td>{result.summary.dirs_copied}</td>
+                <td>{formatCount(result.summary.dirs_copied)}</td>
               </tr>
             )}
             <tr>
               <td>{stopped ? 'Files copied before stopping' : 'Files copied'}</td>
-              <td>{result.summary.files_copied}</td>
+              <td>{formatCount(result.summary.files_copied)}</td>
             </tr>
             {result.summary.files_failed > 0 && (
               <tr className="results-table__bad">
                 <td>Files that failed</td>
-                <td>{result.summary.files_failed}</td>
+                <td>{formatCount(result.summary.files_failed)}</td>
               </tr>
             )}
             {result.summary.files_extra > 0 && (
               <tr>
                 <td>{mirror ? 'Deleted from the destination' : 'Files only in the destination'}</td>
-                <td>{result.summary.files_extra}</td>
+                <td>{formatCount(result.summary.files_extra)}</td>
               </tr>
             )}
             <tr>
@@ -90,7 +118,10 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
             {!stopped && (
               <tr>
                 <td>Result</td>
-                <td>{explainRobocopyExit(result.summary.exit_code, mirror)}</td>
+                <td>
+                  {explainRobocopyExit(result.summary.exit_code, mirror)}{' '}
+                  <span className="results-table__code">(exit code {result.summary.exit_code})</span>
+                </td>
               </tr>
             )}
           </tbody>
@@ -101,15 +132,15 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
           <tbody>
             <tr>
               <td>New files</td>
-              <td>{result.summary.files_new}</td>
+              <td>{formatCount(result.summary.files_new)}</td>
             </tr>
             <tr>
               <td>Changed files</td>
-              <td>{result.summary.files_changed}</td>
+              <td>{formatCount(result.summary.files_changed)}</td>
             </tr>
             <tr>
               <td>Unchanged</td>
-              <td>{result.summary.files_unmodified}</td>
+              <td>{formatCount(result.summary.files_unmodified)}</td>
             </tr>
             <tr>
               <td>New space used</td>
@@ -126,8 +157,24 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
           </tbody>
         </table>
       )}
+      {steps.length > 0 && (
+        <details className="details results-panel__details">
+          <summary>Steps and commands</summary>
+          <JobSteps steps={steps} scan={null} source={profile.source} />
+        </details>
+      )}
+      {log !== null && (
+        <pre className="history__log results-panel__log" aria-label="Log of this run">
+          {log}
+        </pre>
+      )}
       <div className="results-panel__actions">
-        <button type="button" onClick={onOpenLog}>
+        {hasLog && (
+          <button type="button" aria-expanded={log !== null} onClick={toggleLog}>
+            {log === null ? 'View log' : 'Hide log'}
+          </button>
+        )}
+        <button type="button" onClick={onOpenLogDir}>
           Open logs folder
         </button>
         <button type="button" className="primary" onClick={onClose}>

@@ -1,3 +1,4 @@
+pub mod children;
 pub mod console;
 pub mod netuse;
 pub mod restic;
@@ -235,6 +236,18 @@ pub async fn run_job(
     let log_path = robocopy::default_log_path(log_dir);
     let _ = std::fs::create_dir_all(log_dir);
 
+    let phase = |phase: JobPhase, detail: String| {
+        emit(JobEvent::Phase {
+            job_id: job_id.clone(),
+            phase,
+            detail: Some(detail),
+        })
+    };
+
+    phase(
+        JobPhase::Checking,
+        format!("{} → {}", profile.source, profile.destination),
+    );
     if let Err(e) = validate_paths(&profile.source, &profile.destination) {
         finish!(
             Outcome::Failed,
@@ -246,10 +259,6 @@ pub async fn run_job(
 
     // ── Wake-on-LAN ──────────────────────────────────────────────
     if let Some(wol) = &profile.wake_on_lan {
-        emit(JobEvent::Phase {
-            job_id: job_id.clone(),
-            phase: JobPhase::WakingTarget,
-        });
         let host = if wol.host.is_empty() {
             share_root(&profile.destination)
                 .and_then(|s| wol::guess_host_from_share(&s))
@@ -257,6 +266,17 @@ pub async fn run_job(
         } else {
             wol.host.clone()
         };
+        phase(
+            JobPhase::WakingTarget,
+            if host.is_empty() {
+                format!("magic packet to {}; no host to check, so a fixed 12 s wait", wol.mac)
+            } else {
+                format!(
+                    "magic packet to {}, then up to {} s for {host} to answer on port 445 (SMB)",
+                    wol.mac, wol.timeout_secs
+                )
+            },
+        );
         if let Err(e) = wol::wake_and_wait(&wol.mac, &host, wol.timeout_secs, ctx.cancel.clone()).await {
             let outcome = if matches!(e, wol::WolError::Cancelled) {
                 Outcome::Cancelled
@@ -279,10 +299,7 @@ pub async fn run_job(
         None
     };
     if let (Some(share), Some(creds)) = (&share, &profile.credentials) {
-        emit(JobEvent::Phase {
-            job_id: job_id.clone(),
-            phase: JobPhase::Connecting,
-        });
+        phase(JobPhase::Connecting, format!("{share} as {}", creds.user));
         let share_for_msg = share.clone();
         let share = share.clone();
         let user = creds.user.clone();
@@ -380,16 +397,29 @@ pub async fn run_job(
             warning: None,
         }
     } else {
-        emit(JobEvent::Phase {
-            job_id: job_id.clone(),
-            phase: JobPhase::Scanning,
-        });
+        phase(
+            JobPhase::Scanning,
+            robocopy::scan_command_line(
+                &profile.source,
+                &profile.destination,
+                profile.mode,
+                &profile.advanced,
+            ),
+        );
         match robocopy::scan(
             &profile.source,
             &profile.destination,
             profile.mode,
             &profile.advanced,
             ctx.cancel.clone(),
+            |dirs_scanned, current_dir, totals| {
+                emit(JobEvent::ScanProgress {
+                    job_id: job_id.clone(),
+                    dirs_scanned,
+                    current_dir: current_dir.to_string(),
+                    totals,
+                })
+            },
         )
         .await
         {
@@ -458,10 +488,15 @@ pub async fn run_job(
     }
 
     // ── Copy ─────────────────────────────────────────────────────
-    emit(JobEvent::Phase {
-        job_id: job_id.clone(),
-        phase: JobPhase::Copying,
-    });
+    phase(
+        JobPhase::Copying,
+        robocopy::copy_command_line(
+            &profile.source,
+            &profile.destination,
+            profile.mode,
+            &profile.advanced,
+        ),
+    );
     let outcome = run_copy(
         &job_id,
         &profile,
@@ -559,6 +594,16 @@ async fn run_copy(
     let _ = writeln!(log_file, "SRC  : {}", profile.source);
     let _ = writeln!(log_file, "DST  : {}", profile.destination);
     let _ = writeln!(log_file, "MODE : {}", profile.mode.robocopy_flag());
+    let _ = writeln!(
+        log_file,
+        "CMD  : {}",
+        robocopy::copy_command_line(
+            &profile.source,
+            &profile.destination,
+            profile.mode,
+            &profile.advanced
+        )
+    );
     let _ = writeln!(log_file, "{}", "-".repeat(64));
 
     let mut tail: Vec<String> = Vec::new();
@@ -597,8 +642,8 @@ async fn run_copy(
                         current_file = path;
                     }
                     // Deleted (mirror) or left alone (add-only): not part of
-                    // the bytes being copied.
-                    robocopy::RcLine::Extra => {}
+                    // the bytes being copied. Folders are not listed (/NDL).
+                    robocopy::RcLine::Extra | robocopy::RcLine::Dir { .. } => {}
                     robocopy::RcLine::Other(line) => {
                         if robocopy::is_error_line(&line) {
                             unconfirmed = None;
@@ -715,13 +760,25 @@ async fn run_restic_job(
         ),
     };
 
+    let phase = |phase: JobPhase, detail: String| {
+        emit(JobEvent::Phase {
+            job_id: job_id.to_string(),
+            phase,
+            detail: Some(detail),
+        })
+    };
+
+    phase(
+        JobPhase::Connecting,
+        format!("opening the restic repository at {repo}"),
+    );
     match restic::is_initialized(&repo, &password).await {
         Ok(true) => {}
         Ok(false) => {
-            emit(JobEvent::Phase {
-                job_id: job_id.to_string(),
-                phase: JobPhase::Connecting,
-            });
+            phase(
+                JobPhase::Connecting,
+                format!("no repository there yet: creating one at {repo}"),
+            );
             if let Err(e) = restic::init_repo(&repo, &password).await {
                 fail!(
                     Outcome::Failed,
@@ -733,10 +790,14 @@ async fn run_restic_job(
         Err(e) => fail!(Outcome::ConnectionError, e.to_string()),
     }
 
-    emit(JobEvent::Phase {
-        job_id: job_id.to_string(),
-        phase: JobPhase::Copying,
-    });
+    phase(
+        JobPhase::Copying,
+        format!(
+            "restic backup \"{}\" --json{}",
+            profile.source,
+            if dry_run { " --dry-run" } else { "" }
+        ),
+    );
 
     let mut child = match restic::start_backup(
         &profile.source,

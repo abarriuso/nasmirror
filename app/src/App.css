@@ -691,3 +691,160 @@ input[type='radio'] {
     justify-content: flex-end;
   }
 }
+
+/* ── Job steps ─────────────────────────────────────────────────
+   What a job is doing, one row per step: a spinner on the step in progress,
+   how long each took, and the exact paths or command line underneath. */
+.job-steps {
+  list-style: none;
+  margin: var(--sp-4) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.job-step {
+  display: flex;
+  gap: var(--sp-3);
+  align-items: flex-start;
+}
+.job-step__icon {
+  flex: 0 0 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 1px;
+  color: var(--success);
+  font-weight: 700;
+}
+.job-step__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.job-step__line {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.job-step--done .job-step__label {
+  color: var(--muted);
+}
+.job-step--active .job-step__label {
+  color: var(--text);
+  font-weight: 600;
+}
+.job-step__time {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.job-step__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+.job-step__current,
+.job-step__detail {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-family: Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Commands and paths in full, wrapped: cut off, they lose the part that
+   matters (the flags, the folder name). */
+.job-step__detail {
+  white-space: normal;
+  word-break: break-all;
+  user-select: text;
+}
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* A disclosure for technical details (steps, commands). */
+.details {
+  margin: var(--sp-3) 0;
+  text-align: left;
+}
+.details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.details summary:hover {
+  color: var(--accent);
+}
+
+/* Each job card's latest run, from the history. */
+.profile-card__last {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.profile-card__last-outcome--ok {
+  color: var(--success);
+}
+.profile-card__last-outcome--warn {
+  color: var(--warning);
+}
+.profile-card__last-outcome--error {
+  color: var(--danger);
+}
+
+.results-panel__job {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: calc(-1 * var(--sp-2));
+}
+.results-panel__route {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-family: Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.results-panel__log {
+  text-align: left;
+  max-height: 320px;
+  margin-bottom: var(--sp-3);
+}
+.results-table__code {
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-color: var(--accent);
+  }
+}
+.job-step--failed .job-step__icon,
+.job-step--failed .job-step__label {
+  color: var(--danger);
+}
+.job-step--stopped .job-step__icon,
+.job-step--stopped .job-step__label {
+  color: var(--warning);
+}

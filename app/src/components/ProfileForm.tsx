@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { CopyMode, Engine, Profile } from '../types'
 import { emptyRestic, newProfile } from '../types'
-import { formatList, parseList } from '../format'
+import { formatList, isFullPath, parseList } from '../format'
 import { open } from '@tauri-apps/plugin-dialog'
 
 interface Props {
@@ -62,17 +62,26 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
 
   // Wake-on-LAN reads the hex digits of the MAC, whatever separates them.
   const macDigits = (profile.wake_on_lan?.mac ?? '').replace(/[^0-9a-f]/gi, '').length
+  const isNetwork = (p: string) => /^(\\\\|\/\/)/.test(p.trim())
+  // The first thing that stops the job from saving, said where the Save
+  // button is; the backend checks the same and more before every run.
   const problem = !profile.name.trim()
     ? 'Give the job a name.'
     : !profile.source.trim()
       ? 'Choose the source folder.'
       : !profile.destination.trim()
         ? 'Choose the destination folder.'
-        : needsCreds && !profile.credentials?.user.trim()
-          ? 'Enter the network user name, or untick the user name and password option.'
-          : needsWol && macDigits !== 12
-            ? 'Enter the MAC address of the destination (12 hex digits, e.g. AA:BB:CC:DD:EE:FF).'
-            : null
+        : !isFullPath(profile.source)
+          ? 'The source needs a full path, like D:\\Photos or \\\\nas\\share\\Photos.'
+          : !isFullPath(profile.destination)
+            ? 'The destination needs a full path, like D:\\Backups or \\\\nas\\share (two backslashes).'
+            : needsCreds && !profile.credentials?.user.trim()
+              ? 'Enter the network user name, or untick the user name and password option.'
+              : needsCreds && !isNetwork(profile.source) && !isNetwork(profile.destination)
+                ? 'The user name and password are only used for a network path (\\\\nas\\share): untick that option.'
+                : needsWol && macDigits !== 12
+                  ? 'Enter the MAC address of the destination (12 hex digits, e.g. AA:BB:CC:DD:EE:FF).'
+                  : null
 
   const pickFolder = async (which: 'source' | 'destination') => {
     const picked = await open({ directory: true, multiple: false })

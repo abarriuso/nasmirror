@@ -16,13 +16,14 @@ use super::types::{AdvancedOptions, CopyMode, RobocopySummary, ScanTotals};
 ///
 /// `/NC` drops the file class ("New File", "*EXTRA File"), which is localized;
 /// `/FP` keeps full paths, which is how `LineParser` tells the destination's
-/// extra files apart from the files being copied.
+/// extra files apart from the files being copied. Folders are listed in the
+/// scan, so the window can show where it is; the copy leaves them out
+/// (`/NDL`, see `copy_only_args`).
 pub fn common_args(mode: CopyMode, adv: &AdvancedOptions) -> Vec<String> {
     let mut args = vec![
         "/BYTES".into(),
         "/NP".into(),
         "/NC".into(),
-        "/NDL".into(),
         "/FP".into(),
         format!("/R:{}", adv.retries),
         format!("/W:{}", adv.wait_secs),
@@ -54,8 +55,10 @@ pub fn common_args(mode: CopyMode, adv: &AdvancedOptions) -> Vec<String> {
     args
 }
 
+/// The copy does not list folders: one line per folder would fill the log
+/// of a large tree with folders it did nothing in.
 pub fn copy_only_args(adv: &AdvancedOptions) -> Vec<String> {
-    let mut args = vec![];
+    let mut args = vec!["/NDL".to_string()];
     if adv.threads > 0 {
         args.push(format!("/MT:{}", adv.threads));
     }
@@ -65,8 +68,9 @@ pub fn copy_only_args(adv: &AdvancedOptions) -> Vec<String> {
     args
 }
 
-/// A robocopy file line with `/BYTES /NP /NC /NDL /FP`: tab, size in bytes,
-/// tab, full path. An extra folder in the destination has size -1.
+/// A robocopy file or folder line with `/BYTES /NP /NC /FP`: tab, size in
+/// bytes (for a folder, its number of files), tab, full path; a folder's ends
+/// with a backslash. An extra folder in the destination has size -1.
 static FILE_LINE_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
 fn file_line_re() -> &'static regex_lite::Regex {
     FILE_LINE_RE.get_or_init(|| regex_lite::Regex::new(r"^\s*(-?\d+)\t(.+)$").unwrap())
@@ -81,6 +85,8 @@ pub enum RcLine {
     /// A file or folder that only exists in the destination. Mirror mode
     /// deletes it; add-only mode just lists it.
     Extra,
+    /// A source folder robocopy has reached (only the scan lists them).
+    Dir { path: String },
     Other(String),
 }
 
@@ -111,6 +117,11 @@ impl LineParser {
         let path = caps[2].trim();
         if path.to_lowercase().starts_with(&self.dst_prefix) {
             return RcLine::Extra;
+        }
+        if path.ends_with('\\') {
+            return RcLine::Dir {
+                path: path.to_string(),
+            };
         }
         match caps[1].parse::<u64>() {
             Ok(bytes) => RcLine::File {
@@ -257,8 +268,47 @@ fn spawn_robocopy(src: &str, dst: &str, mode_flag: &str, args: &[String]) -> std
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.spawn()
+    super::children::spawn(&mut cmd)
 }
+
+/// The command as it would be typed in a console, for the window's details
+/// and the top of the log.
+fn command_line(src: &str, dst: &str, mode_flag: &str, args: &[String]) -> String {
+    let quote = |a: &str| {
+        if a.is_empty() || a.contains(' ') {
+            format!("\"{a}\"")
+        } else {
+            a.to_string()
+        }
+    };
+    [src, dst, mode_flag]
+        .into_iter()
+        .chain(args.iter().map(String::as_str))
+        .fold("robocopy".to_string(), |line, arg| line + " " + &quote(arg))
+}
+
+fn scan_args(mode: CopyMode, adv: &AdvancedOptions) -> Vec<String> {
+    let mut args = common_args(mode, adv);
+    args.push("/L".into());
+    args
+}
+
+fn copy_args(mode: CopyMode, adv: &AdvancedOptions) -> Vec<String> {
+    let mut args = common_args(mode, adv);
+    args.extend(copy_only_args(adv));
+    args
+}
+
+pub fn scan_command_line(src: &str, dst: &str, mode: CopyMode, adv: &AdvancedOptions) -> String {
+    command_line(src, dst, mode.robocopy_flag(), &scan_args(mode, adv))
+}
+
+pub fn copy_command_line(src: &str, dst: &str, mode: CopyMode, adv: &AdvancedOptions) -> String {
+    command_line(src, dst, mode.robocopy_flag(), &copy_args(mode, adv))
+}
+
+/// How often the scan reports how far it has got.
+const SCAN_REPORT_INTERVAL: Duration = Duration::from_millis(250);
 
 pub struct ScanOutcome {
     pub totals: ScanTotals,
@@ -272,24 +322,26 @@ pub struct ScanOutcome {
 /// copy will do, so an accurate preview can be shown before confirming.
 ///
 /// On large trees or slow destinations the scan can take minutes, so it
-/// honours `cancel`: returns `Ok(None)` if the user stopped it.
+/// honours `cancel` (returns `Ok(None)` if the user stopped it), and calls
+/// `report` a few times a second with the folders it has gone through, the
+/// one it is in, and what it has found to do so far.
 pub async fn scan(
     src: &str,
     dst: &str,
     mode: CopyMode,
     adv: &AdvancedOptions,
     cancel: Arc<AtomicBool>,
+    mut report: impl FnMut(u64, &str, ScanTotals),
 ) -> std::io::Result<Option<ScanOutcome>> {
-    let mut args = common_args(mode, adv);
-    args.push("/L".into());
-    let mut child = spawn_robocopy(src, dst, mode.robocopy_flag(), &args)?;
+    let mut child = spawn_robocopy(src, dst, mode.robocopy_flag(), &scan_args(mode, adv))?;
     let stdout = child.stdout.take().expect("stdout piped");
     let mut reader = ConsoleLines::new(stdout);
     let parser = LineParser::new(dst);
 
-    let mut files_to_copy = 0u64;
-    let mut bytes_to_copy = 0u64;
-    let mut files_to_delete = 0u64;
+    let mut found = ScanTotals::default();
+    let mut dirs_scanned = 0u64;
+    let mut current_dir = String::new();
+    let mut last_report = tokio::time::Instant::now();
     let mut errors = ErrorLog::default();
     let mut tail: Vec<String> = Vec::new();
     loop {
@@ -298,8 +350,12 @@ pub async fn scan(
             let _ = child.wait().await;
             return Ok(None);
         }
-        // Short timeout so `cancel` is checked even while robocopy is slow
-        // to write the next line.
+        if last_report.elapsed() >= SCAN_REPORT_INTERVAL {
+            last_report = tokio::time::Instant::now();
+            report(dirs_scanned, &current_dir, found);
+        }
+        // Short timeout so `cancel` is checked, and progress reported, even
+        // while robocopy is slow to write the next line.
         let next = tokio::time::timeout(Duration::from_millis(150), reader.next_line());
         let line = match next.await {
             Ok(line) => match line? {
@@ -311,12 +367,16 @@ pub async fn scan(
         errors.push(&line);
         match parser.parse(&line) {
             RcLine::File { bytes, .. } => {
-                files_to_copy += 1;
-                bytes_to_copy += bytes;
+                found.files_to_copy += 1;
+                found.bytes_to_copy += bytes;
             }
             // Without /PURGE robocopy lists extras but leaves them alone.
-            RcLine::Extra if mode == CopyMode::Mirror => files_to_delete += 1,
+            RcLine::Extra if mode == CopyMode::Mirror => found.files_to_delete += 1,
             RcLine::Extra => {}
+            RcLine::Dir { path } => {
+                dirs_scanned += 1;
+                current_dir = path;
+            }
             RcLine::Other(line) => {
                 tail.push(line);
                 if tail.len() > 20 {
@@ -325,6 +385,7 @@ pub async fn scan(
             }
         }
     }
+    report(dirs_scanned, "", found);
     let status = child.wait().await?;
     let code = status.code().unwrap_or(-1);
     let error = errors.summary();
@@ -351,16 +412,12 @@ pub async fn scan(
         ),
         None => None,
     };
-    // With /NDL folders are not listed, so a new empty folder is only seen in
-    // the summary's "Dirs" row (Copied column).
-    let dirs_to_create = parse_summary(&tail, code).map_or(0, |s| s.dirs_copied);
+    // A folder line does not say whether the folder is new (/NC drops the
+    // class), so new folders, empty ones included, come from the summary's
+    // "Dirs" row (Copied column).
+    found.dirs_to_create = parse_summary(&tail, code).map_or(0, |s| s.dirs_copied);
     Ok(Some(ScanOutcome {
-        totals: ScanTotals {
-            files_to_copy,
-            bytes_to_copy,
-            files_to_delete,
-            dirs_to_create,
-        },
+        totals: found,
         warning,
     }))
 }
@@ -371,9 +428,7 @@ pub fn start_copy(
     mode: CopyMode,
     adv: &AdvancedOptions,
 ) -> std::io::Result<Child> {
-    let mut args = common_args(mode, adv);
-    args.extend(copy_only_args(adv));
-    spawn_robocopy(src, dst, mode.robocopy_flag(), &args)
+    spawn_robocopy(src, dst, mode.robocopy_flag(), &copy_args(mode, adv))
 }
 
 /// In every Windows language, robocopy prints a final block of rows
@@ -551,7 +606,7 @@ mod tests {
         let adv = AdvancedOptions::default();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let mirror = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel.clone())
+        let mirror = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel.clone(), |_, _, _| {})
             .await
             .unwrap()
             .unwrap();
@@ -560,7 +615,7 @@ mod tests {
         // extra.txt, olddir and olddir\y.txt
         assert_eq!(mirror.files_to_delete, 3);
 
-        let add_only = scan(&src_s, &dst_s, CopyMode::Accumulate, &adv, cancel)
+        let add_only = scan(&src_s, &dst_s, CopyMode::Accumulate, &adv, cancel, |_, _, _| {})
             .await
             .unwrap()
             .unwrap()
@@ -569,6 +624,64 @@ mod tests {
         assert_eq!(add_only.files_to_delete, 0);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The scan says where it is while it goes: folders are counted, not
+    /// taken for files to copy, and the last report has the final numbers.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn scan_reports_the_folders_it_goes_through() {
+        let base = std::env::temp_dir().join(format!("nasmirror-scan-{}", uuid::Uuid::new_v4()));
+        let src = base.join("src");
+        for dir in ["a", "b", r"b\c"] {
+            std::fs::create_dir_all(src.join(dir)).unwrap();
+        }
+        std::fs::write(src.join(r"b\c\x.txt"), "123").unwrap();
+        let (src_s, dst_s) = (src.display().to_string(), base.join("dst").display().to_string());
+        let mut reports: Vec<(u64, String, ScanTotals)> = Vec::new();
+        let outcome = scan(
+            &src_s,
+            &dst_s,
+            CopyMode::Mirror,
+            &AdvancedOptions::default(),
+            Arc::new(AtomicBool::new(false)),
+            |dirs, dir, totals| reports.push((dirs, dir.to_string(), totals)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!((outcome.totals.files_to_copy, outcome.totals.bytes_to_copy), (1, 3));
+        // The source and its three folders, all new.
+        assert_eq!(outcome.totals.dirs_to_create, 4);
+        let (dirs, current, totals) = reports.last().cloned().expect("a final report");
+        assert_eq!((dirs, current.as_str(), totals.files_to_copy), (4, "", 1));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn command_lines_read_as_typed() {
+        let adv = AdvancedOptions {
+            exclude_dirs: vec!["System Volume Information".into()],
+            ..AdvancedOptions::default()
+        };
+        assert_eq!(
+            scan_command_line(r"C:\My Files", r"\\nas\copy", CopyMode::Mirror, &adv),
+            "robocopy \"C:\\My Files\" \\\\nas\\copy /MIR /BYTES /NP /NC /FP /R:1 /W:2 \
+             /XD \"System Volume Information\" /L"
+        );
+        assert!(copy_command_line(r"C:\a", r"D:\b", CopyMode::Accumulate, &adv)
+            .ends_with("/E /BYTES /NP /NC /FP /R:1 /W:2 /XD \"System Volume Information\" /NDL /MT:16"));
+    }
+
+    #[test]
+    fn parse_line_folder() {
+        let parser = LineParser::new(r"D:\mirror");
+        assert!(matches!(
+            parser.parse("\t       3\tC:\\data\\photos\\"),
+            RcLine::Dir { path } if path == "C:\\data\\photos\\"
+        ));
     }
 
     /// A new empty folder is the only difference: with /NDL no line lists
@@ -588,7 +701,7 @@ mod tests {
         let cancel = Arc::new(AtomicBool::new(false));
 
         for mode in [CopyMode::Mirror, CopyMode::Accumulate] {
-            let totals = scan(&src_s, &dst_s, mode, &adv, cancel.clone())
+            let totals = scan(&src_s, &dst_s, mode, &adv, cancel.clone(), |_, _, _| {})
                 .await
                 .unwrap()
                 .unwrap()
@@ -598,7 +711,7 @@ mod tests {
         }
 
         std::fs::create_dir_all(dst.join("empty")).unwrap();
-        let totals = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel)
+        let totals = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel, |_, _, _| {})
             .await
             .unwrap()
             .unwrap()
@@ -763,6 +876,6 @@ mod tests {
         assert_eq!(args.iter().filter(|a| *a == "/XD").count(), 1);
         assert!(!args.contains(&"/L".to_string()));
 
-        assert_eq!(copy_only_args(&adv), vec!["/MT:16".to_string()]);
+        assert_eq!(copy_only_args(&adv), ["/NDL", "/MT:16"]);
     }
 }

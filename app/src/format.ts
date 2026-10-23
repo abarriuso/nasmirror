@@ -57,6 +57,70 @@ export function formatList(items: string[]): string {
 }
 
 /**
+ * When a run finished, from the history's "2026-10-23 20:09:07": "today
+ * 20:09", "yesterday 20:09", or "23 Oct 20:09" (with the year when it is
+ * not this one). `today` is for the tests.
+ */
+export function formatWhen(stamp: string, today = new Date()): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/.exec(stamp)
+  if (!m) return stamp
+  const [, y, mo, d, h, mi] = m
+  const day = new Date(Number(y), Number(mo) - 1, Number(d))
+  const midnight = new Date(today.getFullYear(), today.getMonth(), today.getDate())
+  const daysAgo = Math.round((midnight.getTime() - day.getTime()) / 86_400_000)
+  const time = `${h}:${mi}`
+  if (daysAgo === 0) return `today ${time}`
+  if (daysAgo === 1) return `yesterday ${time}`
+  const month = day.toLocaleString('en-GB', { month: 'short' })
+  const year = day.getFullYear() === today.getFullYear() ? '' : ` ${y}`
+  return `${Number(d)} ${month}${year} ${time}`
+}
+
+/** A count with thousands separators, in the UI's English: 12,345. */
+export function formatCount(n: number): string {
+  return Math.round(n).toLocaleString('en-US')
+}
+
+/** "1 file", "2 files", "12,345 files". */
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${formatCount(n)} ${n === 1 ? one : many}`
+}
+
+/** A short duration for a step or a wait: "0.4 s", "42 s", "3 min 05 s", "1 h 02 min". */
+export function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) ms = 0
+  const s = ms / 1000
+  if (s < 10) return `${s.toFixed(1)} s`
+  if (s < 60) return `${Math.floor(s)} s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m} min ${String(Math.floor(s % 60)).padStart(2, '0')} s`
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} min`
+}
+
+/**
+ * `path` shown from `base` on (`…\PROYECTOS\app`), or whole when it is not
+ * inside `base`: the shared start of every path in a scan only takes room.
+ */
+export function relativePath(base: string, path: string): string {
+  const b = base.replace(/[\\/]+$/, '')
+  if (b && path.toLowerCase().startsWith(`${b.toLowerCase()}\\`)) {
+    const rest = path.slice(b.length + 1).replace(/\\$/, '')
+    return rest ? `…\\${rest}` : path
+  }
+  return path
+}
+
+/**
+ * `D:\folder` or `\\host\share\folder`, as the backend requires: anything
+ * else (`\nas\share`, `backup`) Windows resolves against a folder nobody
+ * typed.
+ */
+export function isFullPath(path: string): boolean {
+  const p = path.trim()
+  return /^[a-z]:[\\/]/i.test(p) || /^(\\\\|\/\/)[^\\/]+[\\/][^\\/]+/.test(p)
+}
+
+/**
  * How far a copy has got, from 0 to 1. Bytes alone mislead while robocopy
  * works through many small files (each takes time but moves few bytes), and
  * files alone while it copies a few large ones: the average of both is a

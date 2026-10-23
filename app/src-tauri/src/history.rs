@@ -16,6 +16,9 @@ pub struct HistoryEntry {
     /// alphabetical order is also chronological order.
     pub id: String,
     pub finished_at: String,
+    /// The job it ran; empty for entries written before it was recorded.
+    #[serde(default)]
+    pub profile_id: String,
     pub profile_name: String,
     pub source: String,
     pub destination: String,
@@ -46,6 +49,7 @@ pub fn record(log_path: &Path, profile: &Profile, result: &JobResult) {
     let entry = HistoryEntry {
         id: stem,
         finished_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        profile_id: profile.id.clone(),
         profile_name: profile.name.clone(),
         source: profile.source.clone(),
         destination: profile.destination.clone(),
@@ -107,6 +111,7 @@ pub fn list(log_dir: &Path) -> Vec<HistoryEntry> {
         entries.push(HistoryEntry {
             finished_at: date_from_stem(&stem).unwrap_or_default(),
             id: stem,
+            profile_id: String::new(),
             profile_name: String::new(),
             source: String::new(),
             destination: String::new(),
@@ -249,6 +254,7 @@ mod tests {
             serde_json::to_string(&HistoryEntry {
                 id: "backup_2026-02-02_10-00-00".into(),
                 finished_at: "2026-02-02 10:00:05".into(),
+                profile_id: "p1".into(),
                 profile_name: "Photos".into(),
                 source: r"C:\photos".into(),
                 destination: r"\\nas\backup".into(),

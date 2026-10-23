@@ -65,6 +65,7 @@ export interface ScanTotals {
 }
 
 export type JobPhase =
+  | 'checking'
   | 'connecting'
   | 'waking_target'
   | 'scanning'
@@ -116,6 +117,8 @@ export interface JobResult {
 export interface HistoryEntry {
   id: string
   finished_at: string
+  /** The job that ran; empty for entries written before it was recorded. */
+  profile_id: string
   profile_name: string
   source: string
   destination: string
@@ -143,7 +146,20 @@ export interface ProgressSample {
 }
 
 export type JobEvent =
-  | { type: 'phase'; job_id: string; phase: JobPhase }
+  | {
+      type: 'phase'
+      job_id: string
+      phase: JobPhase
+      /** What exactly the step does: the paths, the share and user, the command run. */
+      detail: string | null
+    }
+  | ({
+      type: 'scan_progress'
+      job_id: string
+      dirs_scanned: number
+      /** Empty once the scan has finished. */
+      current_dir: string
+    } & ScanTotals)
   | ({
       type: 'scan_result'
       job_id: string

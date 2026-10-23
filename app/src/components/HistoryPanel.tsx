@@ -1,20 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { askToConfirm } from '../dialogs'
-import { formatBytes, formatDuration } from '../format'
-import type { HistoryEntry, Outcome } from '../types'
+import { formatBytes, formatDuration, formatWhen } from '../format'
+import type { HistoryEntry } from '../types'
+import { OUTCOME_BADGE } from '../outcomes'
 
 interface Props {
   onClose: () => void
-}
-
-const OUTCOME_BADGE: Record<Outcome, { label: string; tone: 'ok' | 'warn' | 'error' }> = {
-  success: { label: 'Finished', tone: 'ok' },
-  no_changes: { label: 'No changes', tone: 'ok' },
-  success_with_mismatches: { label: 'With warnings', tone: 'warn' },
-  cancelled: { label: 'Cancelled', tone: 'warn' },
-  failed: { label: 'Failed', tone: 'error' },
-  connection_error: { label: 'No connection', tone: 'error' },
 }
 
 export function HistoryPanel({ onClose }: Props) {
@@ -54,7 +46,9 @@ export function HistoryPanel({ onClose }: Props) {
     return (
       <div className="history">
         <div className="history__toolbar">
-          <h1>{detail.entry.finished_at}</h1>
+          <h1>
+            {detail.entry.profile_name || 'Earlier backup'} · {formatWhen(detail.entry.finished_at)}
+          </h1>
           <button type="button" onClick={() => setDetail(null)}>
             Back to history
           </button>
@@ -112,7 +106,9 @@ export function HistoryPanel({ onClose }: Props) {
                     <span className="history__badge">No details</span>
                   )}
                 </div>
-                <span className="history__meta">{entry.finished_at}</span>
+                <span className="history__meta" title={entry.finished_at}>
+                  {formatWhen(entry.finished_at)}
+                </span>
                 {entry.outcome && (
                   <span className="history__meta">
                     {entry.files_copied} files · {formatBytes(entry.bytes_copied)} ·{' '}

@@ -1,15 +1,16 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 import { api, onJobEvent } from './api'
-import type { JobEvent, JobPhase, JobResult, Profile, ScanTotals } from './types'
+import type { HistoryEntry, JobEvent, JobPhase, JobResult, Outcome, Profile, ScanTotals } from './types'
 import { ProfileForm } from './components/ProfileForm'
 import { JobView } from './components/JobView'
-import { PHASE_LABEL } from './phases'
+import { JobSteps, type JobStep, type ScanSnapshot, type StepEnd } from './components/JobSteps'
 import { ResultsPanel } from './components/ResultsPanel'
 import { HistoryPanel } from './components/HistoryPanel'
+import { OUTCOME_BADGE } from './outcomes'
 import { notifyFinished } from './notify'
 import { askToConfirm, showError } from './dialogs'
 import type { SpeedSample } from './components/SpeedChart'
-import { copyProgress, formatBytes } from './format'
+import { copyProgress, formatBytes, formatDuration, formatElapsed, formatWhen, plural } from './format'
 import './App.css'
 
 type View =
@@ -27,10 +28,14 @@ type View =
       warning: string | null
     }
   | { kind: 'job'; profile: Profile; jobId: string }
-  | { kind: 'result'; result: JobResult; mirror: boolean }
+  | { kind: 'result'; result: JobResult; profile: Profile }
 
 interface JobState {
   phase: JobPhase
+  /** What the job has done so far, step by step, with timings and details. */
+  steps: JobStep[]
+  /** How far the scan has got; `null` until it reports. */
+  scan: ScanSnapshot | null
   bytesDone: number
   bytesTotal: number
   filesDone: number
@@ -41,7 +46,9 @@ interface JobState {
 
 function emptyJobState(): JobState {
   return {
-    phase: 'connecting',
+    phase: 'checking',
+    steps: [],
+    scan: null,
     bytesDone: 0,
     bytesTotal: 0,
     filesDone: 0,
@@ -51,14 +58,36 @@ function emptyJobState(): JobState {
   }
 }
 
+/** Ends the step in progress, if any, as `ended`. */
+function closeSteps(steps: JobStep[], now: number, ended: StepEnd = 'done'): JobStep[] {
+  return steps.map((s) => (s.endedMs === null ? { ...s, endedMs: now, ended } : s))
+}
+
+/** How the step a job ended in went, from the job's outcome. */
+function stepEndOf(outcome: Outcome): StepEnd {
+  if (outcome === 'failed' || outcome === 'connection_error') return 'failed'
+  return outcome === 'cancelled' ? 'stopped' : 'done'
+}
+
 export default function App() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [view, setView] = useState<View>({ kind: 'list' })
   const [job, setJob] = useState<JobState>(emptyJobState())
   const [busy, setBusy] = useState(false)
   const [loadingProfiles, setLoadingProfiles] = useState(true)
+  const [history, setHistory] = useState<HistoryEntry[]>([])
+  const [cancelling, setCancelling] = useState(false)
   const lastBytesRef = useRef<{ atMs: number; bytes: number } | null>(null)
   const activeJobIdRef = useRef<string | null>(null)
+  // Cancel pressed before startJob returned the job's id.
+  const cancelRequestedRef = useRef(false)
+
+  const refreshHistory = () => {
+    api
+      .listHistory()
+      .then(setHistory)
+      .catch(() => {})
+  }
 
   useEffect(() => {
     api
@@ -66,6 +95,7 @@ export default function App() {
       .then(setProfiles)
       .catch((e) => showError(errorMessage(e)))
       .finally(() => setLoadingProfiles(false))
+    refreshHistory()
     const unlisten = onJobEvent(handleJobEvent)
     return () => {
       unlisten.then((fn) => fn())
@@ -80,8 +110,37 @@ export default function App() {
     if ('job_id' in event && activeJobId && event.job_id !== activeJobId) return
 
     switch (event.type) {
-      case 'phase':
-        setJob((j) => ({ ...j, phase: event.phase }))
+      case 'phase': {
+        const now = Date.now()
+        setJob((j) => {
+          const last = j.steps[j.steps.length - 1]
+          // The same step again (restic opening, then creating, the
+          // repository): only its detail changes.
+          const steps =
+            last && last.endedMs === null && last.phase === event.phase
+              ? [...j.steps.slice(0, -1), { ...last, detail: event.detail }]
+              : [
+                  ...closeSteps(j.steps, now),
+                  { phase: event.phase, detail: event.detail, startedMs: now, endedMs: null },
+                ]
+          return { ...j, phase: event.phase, steps }
+        })
+        break
+      }
+      case 'scan_progress':
+        setJob((j) => ({
+          ...j,
+          scan: {
+            dirsScanned: event.dirs_scanned,
+            currentDir: event.current_dir,
+            totals: {
+              files_to_copy: event.files_to_copy,
+              bytes_to_copy: event.bytes_to_copy,
+              files_to_delete: event.files_to_delete,
+              dirs_to_create: event.dirs_to_create,
+            },
+          },
+        }))
         break
       case 'scan_result':
         setJob((j) => ({
@@ -98,6 +157,15 @@ export default function App() {
           },
           warning: event.warning,
         }
+        // The final numbers, folders to create included, for the step list.
+        setJob((j) => ({
+          ...j,
+          scan: {
+            dirsScanned: j.scan?.dirsScanned ?? 0,
+            currentDir: '',
+            totals: pendingScan.current!.scan,
+          },
+        }))
         break
       case 'progress': {
         const now = Date.now()
@@ -126,9 +194,13 @@ export default function App() {
         })
         break
       }
-      case 'finished':
+      case 'finished': {
+        const now = Date.now()
+        const ended = stepEndOf(event.result.outcome)
+        setJob((j) => ({ ...j, steps: closeSteps(j.steps, now, ended) }))
         onJobFinished(event.result)
         break
+      }
       default:
         break
     }
@@ -146,7 +218,7 @@ export default function App() {
     const ctx = pendingContext.current
     if (!ctx) return
     setBusy(false)
-    const mirror = ctx.profile.mode === 'mirror'
+    setCancelling(false)
     if (!ctx.forReal) {
       pendingContext.current = null
       if (result.outcome === 'cancelled') {
@@ -157,7 +229,7 @@ export default function App() {
       // The scan only leads to the preview if it found changes; "no changes"
       // or any error is shown directly as the result.
       if (result.outcome !== 'success') {
-        setView({ kind: 'result', result, mirror })
+        setView({ kind: 'result', result, profile: ctx.profile })
         return
       }
       const found = pendingScan.current ?? {
@@ -178,7 +250,8 @@ export default function App() {
     pendingContext.current = null
     activeJobIdRef.current = null
     void notifyFinished(ctx.profile.name, result)
-    setView({ kind: 'result', result, mirror })
+    setView({ kind: 'result', result, profile: ctx.profile })
+    refreshHistory()
   }
 
   async function startPreview(profile: Profile, password: string, resticPassword: string) {
@@ -190,17 +263,20 @@ export default function App() {
     // Until startJob returns the id, events from the new job must not be
     // filtered by the previous job's id (the backend runs one job at a time).
     activeJobIdRef.current = null
+    cancelRequestedRef.current = false
+    setCancelling(false)
     if (profile.engine === 'restic') {
       await confirmAndRun({ profile, password, resticPassword })
       return
     }
     // The scan can take a while (Wake-on-LAN, connecting, large trees), so
-    // its phase is shown and it can be cancelled.
+    // its steps are shown as they go and it can be cancelled.
     setJob(emptyJobState())
     setView({ kind: 'analyzing', profile })
     try {
       const jobId = await api.startJob({ profile, password: password || null, dry_run: true })
       activeJobIdRef.current = jobId
+      if (cancelRequestedRef.current) await api.cancelJob(jobId)
     } catch (e: unknown) {
       setBusy(false)
       setView({ kind: 'list' })
@@ -209,8 +285,12 @@ export default function App() {
   }
 
   async function cancelAnalysis() {
+    setCancelling(true)
     const jobId = activeJobIdRef.current
+    // Pressed before the job had an id: `startPreview` cancels it as soon
+    // as it gets one.
     if (jobId) await api.cancelJob(jobId)
+    else cancelRequestedRef.current = true
   }
 
   async function confirmAndRun(fromPreview?: { profile: Profile; password: string; resticPassword: string }) {
@@ -226,6 +306,7 @@ export default function App() {
     setJob(emptyJobState())
     lastBytesRef.current = null
     setBusy(true)
+    setCancelling(false)
     const context = { profile, password, resticPassword, forReal: true }
     pendingContext.current = context
     activeJobIdRef.current = null
@@ -253,6 +334,7 @@ export default function App() {
     if (view.kind !== 'job') return
     const { jobId } = view
     if (!(await askToConfirm('Stop the copy in progress? Files already copied are kept.', 'Stop'))) return
+    setCancelling(true)
     await api.cancelJob(jobId)
   }
 
@@ -290,11 +372,20 @@ export default function App() {
       </header>
 
       <main className="app-main">
-        {view.kind === 'history' && <HistoryPanel onClose={() => setView({ kind: 'list' })} />}
+        {view.kind === 'history' && (
+          <HistoryPanel
+            onClose={() => {
+              // Entries may have been deleted: the job cards show the latest.
+              refreshHistory()
+              setView({ kind: 'list' })
+            }}
+          />
+        )}
 
         {view.kind === 'list' && (
           <ProfileList
             profiles={profiles}
+            history={history}
             busy={busy}
             loading={loadingProfiles}
             onNew={() => setView({ kind: 'form' })}
@@ -313,12 +404,20 @@ export default function App() {
         )}
 
         {view.kind === 'analyzing' && (
-          <div className="preview-panel" aria-live="polite">
+          <div className="preview-panel">
             <h2>{view.profile.name}</h2>
-            <p>{PHASE_LABEL[job.phase]}</p>
+            <Route source={view.profile.source} destination={view.profile.destination} />
+            <JobSteps steps={job.steps} scan={job.scan} source={view.profile.source} />
+            {job.phase === 'scanning' && (
+              <p className="field-hint">
+                Nothing is copied or deleted yet. Robocopy is comparing every file in the source
+                with the destination; on a large folder over the network that takes a while, and
+                you will see the result before anything is done.
+              </p>
+            )}
             <div className="form-actions">
-              <button type="button" onClick={cancelAnalysis}>
-                Cancel
+              <button type="button" disabled={cancelling} onClick={cancelAnalysis}>
+                {cancelling ? 'Cancelling…' : 'Cancel'}
               </button>
             </div>
           </div>
@@ -331,6 +430,8 @@ export default function App() {
             source={view.profile.source}
             destination={view.profile.destination}
             mirror={view.profile.mode === 'mirror'}
+            steps={job.steps}
+            scanSnapshot={job.scan}
             onCancel={() => { setBusy(false); setView({ kind: 'list' }) }}
             onConfirm={() => confirmAndRun()}
           />
@@ -345,6 +446,9 @@ export default function App() {
             filesTotal={job.filesTotal}
             currentFile={job.currentFile}
             samples={job.samples}
+            steps={job.steps}
+            source={view.profile.source}
+            stopping={cancelling}
             onCancel={cancelJob}
           />
         )}
@@ -352,9 +456,10 @@ export default function App() {
         {view.kind === 'result' && (
           <ResultsPanel
             result={view.result}
-            mirror={view.mirror}
+            profile={view.profile}
+            steps={job.steps}
             onClose={() => setView({ kind: 'list' })}
-            onOpenLog={() => api.openLogDir()}
+            onOpenLogDir={() => api.openLogDir()}
           />
         )}
       </main>
@@ -370,8 +475,11 @@ function ProfileList({
   onEdit,
   onDelete,
   onRun,
+  history,
 }: {
   profiles: Profile[]
+  /** Newest first, for each card's last run. */
+  history: HistoryEntry[]
   busy: boolean
   loading: boolean
   onNew: () => void
@@ -442,6 +550,7 @@ function ProfileList({
                   {p.engine === 'restic' ? 'Versioned' : 'Direct copy'}
                 </span>
               </div>
+              <LastRun entry={lastRunOf(p, history)} />
             </div>
             <div className="profile-card__actions">
               {runningPasswordFor?.id === p.id ? (
@@ -468,6 +577,9 @@ function ProfileList({
                   )}
                   <button className="primary" disabled={busy} onClick={() => runWithPasswords(p)}>
                     {p.engine === 'restic' ? 'Back up' : 'Preview'}
+                  </button>
+                  <button type="button" onClick={closePasswords}>
+                    Cancel
                   </button>
                 </>
               ) : (
@@ -497,12 +609,54 @@ function ProfileList({
   )
 }
 
+/**
+ * The job's latest run in the history: by id, or by name for entries written
+ * before the id was recorded.
+ */
+function lastRunOf(p: Profile, history: HistoryEntry[]): HistoryEntry | undefined {
+  return history.find((e) => (e.profile_id ? e.profile_id === p.id : e.profile_name === p.name))
+}
+
+function LastRun({ entry }: { entry: HistoryEntry | undefined }) {
+  if (!entry?.outcome) return <span className="profile-card__last">Never run</span>
+  const badge = OUTCOME_BADGE[entry.outcome]
+  return (
+    <span className="profile-card__last" title={entry.error ?? undefined}>
+      Last run {formatWhen(entry.finished_at)} ·{' '}
+      <span className={`profile-card__last-outcome profile-card__last-outcome--${badge.tone}`}>
+        {badge.label}
+      </span>
+      {entry.outcome !== 'failed' && entry.outcome !== 'connection_error' && (
+        <>
+          {' '}
+          · {plural(entry.files_copied, 'file')} · {formatBytes(entry.bytes_copied)} ·{' '}
+          {formatDuration(entry.elapsed_secs)}
+        </>
+      )}
+    </span>
+  )
+}
+
+function Route({ source, destination }: { source: string; destination: string }) {
+  return (
+    <div className="preview-panel__route">
+      <code className="preview-panel__path">{source}</code>
+      <span className="preview-panel__arrow" aria-label="to">
+        →
+      </span>
+      <code className="preview-panel__path">{destination}</code>
+    </div>
+  )
+}
+
 function PreviewPanel({
   scan,
   warning,
   source,
   destination,
   mirror,
+  steps,
+  scanSnapshot,
   onCancel,
   onConfirm,
 }: {
@@ -511,35 +665,48 @@ function PreviewPanel({
   source: string
   destination: string
   mirror: boolean
+  /** How the preview was worked out, for its details. */
+  steps: JobStep[]
+  scanSnapshot: ScanSnapshot | null
   onCancel: () => void
   onConfirm: () => void
 }) {
   const filesToDelete = scan.files_to_delete
+  const scanStep = steps.find((s) => s.phase === 'scanning')
   return (
     <div className="preview-panel">
       <h2>Before copying</h2>
       <p>
-        <strong>{scan.files_to_copy}</strong> files will be copied ({formatBytes(scan.bytes_to_copy)})
+        <strong>{plural(scan.files_to_copy, 'file')}</strong> will be copied (
+        {formatBytes(scan.bytes_to_copy)})
         {scan.dirs_to_create > 0 && (
           <>
             {' '}
-            and <strong>{scan.dirs_to_create}</strong> new folders created
+            and <strong>{plural(scan.dirs_to_create, 'new folder')}</strong> created
           </>
         )}
         :
       </p>
-      <div className="preview-panel__route">
-        <code className="preview-panel__path">{source}</code>
-        <span className="preview-panel__arrow">→</span>
-        <code className="preview-panel__path">{destination}</code>
-      </div>
+      <Route source={source} destination={destination} />
       {mirror && filesToDelete > 0 && (
         <p className="preview-panel__danger">
-          ⚠ Mirror mode: <strong>{filesToDelete}</strong> files or folders will be
-          <strong> deleted</strong> from the destination because they no longer exist in the source.
+          ⚠ Mirror mode:{' '}
+          <strong>{plural(filesToDelete, 'file or folder', 'files or folders')}</strong> will be
+          <strong> deleted</strong> from the destination because{' '}
+          {filesToDelete === 1 ? 'it no longer exists' : 'they no longer exist'} in the source.
         </p>
       )}
       {warning && <p className="preview-panel__danger">⚠ {warning}</p>}
+      {scanStep?.endedMs != null && (
+        <p className="field-hint">
+          Compared {plural(scanSnapshot?.dirsScanned ?? 0, 'folder')} in{' '}
+          {formatElapsed(scanStep.endedMs - scanStep.startedMs)}. Nothing has been copied yet.
+        </p>
+      )}
+      <details className="details">
+        <summary>How this was worked out</summary>
+        <JobSteps steps={steps} scan={scanSnapshot} source={source} />
+      </details>
       <div className="form-actions">
         <button onClick={onCancel}>Cancel</button>
         <button className={mirror && filesToDelete > 0 ? 'danger' : 'primary'} onClick={onConfirm}>

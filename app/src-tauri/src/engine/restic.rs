@@ -46,12 +46,22 @@ fn map_spawn_error(e: std::io::Error) -> ResticError {
     }
 }
 
+/// `cmd.output()`, with restic tied to NASMirror's life (see `children`):
+/// `forget --prune` can run for minutes.
+async fn output(cmd: &mut Command) -> Result<std::process::Output, ResticError> {
+    let child = super::children::spawn(cmd).map_err(map_spawn_error)?;
+    child
+        .wait_with_output()
+        .await
+        .map_err(|e| ResticError::Failed(e.to_string()))
+}
+
 pub async fn is_initialized(repo: &str, password: &str) -> Result<bool, ResticError> {
     let mut cmd = base_command(repo, password);
     cmd.args(["cat", "config"]);
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::piped());
-    let output = cmd.output().await.map_err(map_spawn_error)?;
+    let output = output(&mut cmd).await?;
     classify_cat_config(
         output.status.code(),
         &String::from_utf8_lossy(&output.stderr),
@@ -87,7 +97,7 @@ pub async fn init_repo(repo: &str, password: &str) -> Result<(), ResticError> {
     cmd.args(["init"]);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    let output = cmd.output().await.map_err(map_spawn_error)?;
+    let output = output(&mut cmd).await?;
     if output.status.success() {
         Ok(())
     } else {
@@ -123,7 +133,7 @@ pub async fn forget_and_prune(
     }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    let output = cmd.output().await.map_err(map_spawn_error)?;
+    let output = output(&mut cmd).await?;
     if output.status.success() {
         Ok(())
     } else {
@@ -159,7 +169,7 @@ pub fn start_backup(
     // stderr is drained by a separate task (see `run_restic_job`); otherwise
     // restic would block once the pipe buffer fills up.
     cmd.stderr(Stdio::piped());
-    cmd.spawn().map_err(map_spawn_error)
+    super::children::spawn(&mut cmd).map_err(map_spawn_error)
 }
 
 /// How `restic backup` ended, from its exit code (restic docs, "Exit status
