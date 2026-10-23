@@ -147,7 +147,7 @@ export type JobEvent =
   | ({
       type: 'scan_result'
       job_id: string
-      /** Parts of the source robocopy could not read; the rest can still be copied. */
+      /** A problem robocopy reported while scanning; what it could read can still be copied. */
       warning: string | null
     } & ScanTotals)
   | ({ type: 'progress' } & ProgressSample)

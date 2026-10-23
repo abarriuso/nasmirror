@@ -39,6 +39,9 @@ function explainRobocopyExit(code: number, mirror: boolean): string {
 
 export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
   const info = OUTCOME_INFO[result.outcome]
+  // A stopped robocopy prints no summary: the backend counts the files it saw
+  // finish, but the folders and an exit code of its own are not known.
+  const stopped = result.outcome === 'cancelled'
   return (
     <div className={`results-panel results-panel--${info.tone}`}>
       <div className="results-panel__icon" role="img" aria-label={info.title}>{info.icon}</div>
@@ -54,12 +57,14 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
       {result.summary?.engine === 'robocopy' && (
         <table className="results-table">
           <tbody>
+            {!stopped && (
+              <tr>
+                <td>Folders copied</td>
+                <td>{result.summary.dirs_copied}</td>
+              </tr>
+            )}
             <tr>
-              <td>Folders copied</td>
-              <td>{result.summary.dirs_copied}</td>
-            </tr>
-            <tr>
-              <td>Files copied</td>
+              <td>{stopped ? 'Files copied before stopping' : 'Files copied'}</td>
               <td>{result.summary.files_copied}</td>
             </tr>
             {result.summary.files_failed > 0 && (
@@ -82,10 +87,12 @@ export function ResultsPanel({ result, mirror, onClose, onOpenLog }: Props) {
               <td>Duration</td>
               <td>{formatDuration(result.elapsed_secs)}</td>
             </tr>
-            <tr>
-              <td>Result</td>
-              <td>{explainRobocopyExit(result.summary.exit_code, mirror)}</td>
-            </tr>
+            {!stopped && (
+              <tr>
+                <td>Result</td>
+                <td>{explainRobocopyExit(result.summary.exit_code, mirror)}</td>
+              </tr>
+            )}
           </tbody>
         </table>
       )}

@@ -122,33 +122,86 @@ impl LineParser {
     }
 }
 
-/// `<date> <time> ERROR <code> (0x<hex>) <what it was doing> <path>`. The word
-/// ERROR is not translated; the rest of the line is.
+/// `<date> <time> ERROR <code> (0x<8 hex digits>) <what it was doing> <path>`.
+/// The word is translated in some languages (FEHLER, ERREUR), so the line is
+/// recognised by its shape and the word is captured.
 static ERROR_LINE_RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
 fn error_line_re() -> &'static regex_lite::Regex {
     ERROR_LINE_RE.get_or_init(|| {
-        regex_lite::Regex::new(r"\bERROR (\d+) \(0x[0-9A-Fa-f]+\) (.+)$").unwrap()
+        regex_lite::Regex::new(r"(\S+) \d+ \(0x[0-9A-Fa-f]{8}\) (.+)$").unwrap()
     })
 }
 
+/// Whether robocopy is reporting a failed attempt on this line.
+pub fn is_error_line(line: &str) -> bool {
+    error_line_re().is_match(line)
+}
+
+fn hash_of(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// The distinct errors of one kind: the first one in full, the rest counted.
+/// Hashes keep it cheap when thousands of files fail.
+#[derive(Default)]
+struct DistinctErrors {
+    seen: std::collections::HashSet<u64>,
+    first: Option<String>,
+}
+
+impl DistinctErrors {
+    fn add(&mut self, error: &str) {
+        if self.seen.insert(hash_of(error)) && self.first.is_none() {
+            self.first = Some(error.to_string());
+        }
+    }
+
+    fn summary(self) -> Option<String> {
+        let first = self.first?;
+        Some(match self.seen.len() {
+            1 => first,
+            n => format!("{first} (and {} more errors, see the log)", n - 1),
+        })
+    }
+}
+
 /// Collects the errors robocopy prints while it works, so a failed run can
-/// say why instead of just "failed": each one is an `ERROR` line followed by
-/// the system's explanation ("Access is denied."). A retried file repeats
-/// the same error, so each distinct one is kept once.
+/// say why instead of just "failed": each one is an error line followed by
+/// the system's explanation ("Access is denied."). Robocopy retries, so an
+/// error is not always a failure: the ones that failed the run are followed
+/// by "ERROR: RETRY LIMIT EXCEEDED." (in the same word as the error line),
+/// and those are reported first.
 #[derive(Default)]
 pub struct ErrorLog {
-    /// An `ERROR` line still waiting for its explanation on the next line.
+    /// How this robocopy spells ERROR, from its first error line.
+    word: Option<String>,
+    /// An error line still waiting for its explanation on the next line.
     pending: Option<String>,
-    errors: Vec<String>,
+    /// The last complete error, which a retry-limit line marks as final.
+    last: Option<String>,
+    all: DistinctErrors,
+    gave_up: DistinctErrors,
 }
 
 impl ErrorLog {
     pub fn push(&mut self, line: &str) {
         let line = line.trim();
+        if self.is_retry_limit(line) {
+            if let Some(what) = self.pending.take() {
+                self.add(what);
+            }
+            if let Some(last) = self.last.take() {
+                self.gave_up.add(&last);
+            }
+            return;
+        }
         if let Some(what) = self.pending.take() {
             // With /MT the explanation can be missing, or another thread's
             // line can come in between: never take a file or error line for it.
-            if line.is_empty() || error_line_re().is_match(line) || file_line_re().is_match(line) {
+            if line.is_empty() || is_error_line(line) || file_line_re().is_match(line) {
                 self.add(what);
             } else {
                 self.add(format!("{what}: {line}"));
@@ -156,29 +209,39 @@ impl ErrorLog {
             }
         }
         if let Some(caps) = error_line_re().captures(line) {
+            self.word.get_or_insert_with(|| caps[1].to_string());
             self.pending = Some(caps[2].trim().to_string());
         }
     }
 
-    fn add(&mut self, error: String) {
-        if !self.errors.contains(&error) {
-            self.errors.push(error);
-        }
+    /// "ERROR: RETRY LIMIT EXCEEDED." or its translation: the error word, a
+    /// colon (French puts a space before it), and no error code.
+    fn is_retry_limit(&self, line: &str) -> bool {
+        let Some(word) = &self.word else {
+            return false;
+        };
+        line.strip_prefix(word.as_str())
+            .is_some_and(|rest| rest.trim_start().starts_with(':'))
+            && !is_error_line(line)
     }
 
-    /// The first error, and how many others there were.
-    pub fn summary(&self) -> Option<String> {
-        let mut errors = self.errors.clone();
-        if let Some(what) = &self.pending {
-            if !errors.contains(what) {
-                errors.push(what.clone());
-            }
+    fn add(&mut self, error: String) {
+        self.all.add(&error);
+        self.last = Some(error);
+    }
+
+    /// The first error that failed the run, and how many others there were.
+    /// Without any (robocopy stopped before giving up on a file), the first
+    /// error of any kind.
+    pub fn summary(mut self) -> Option<String> {
+        if let Some(what) = self.pending.take() {
+            self.add(what);
         }
-        let first = errors.first()?;
-        Some(match errors.len() {
-            1 => first.clone(),
-            n => format!("{first} (and {} more errors, see the log)", n - 1),
-        })
+        if self.gave_up.first.is_some() {
+            self.gave_up.summary()
+        } else {
+            self.all.summary()
+        }
     }
 }
 
@@ -199,8 +262,9 @@ fn spawn_robocopy(src: &str, dst: &str, mode_flag: &str, args: &[String]) -> std
 
 pub struct ScanOutcome {
     pub totals: ScanTotals,
-    /// Robocopy could not read part of the tree (exit code 8, e.g. a folder
-    /// the user has no access to). The rest can still be copied.
+    /// Robocopy reported a problem while scanning: part of the tree it could
+    /// not read (exit code 8), or a destination it could not reach. What it
+    /// could read can still be copied.
     pub warning: Option<String>,
 }
 
@@ -263,24 +327,30 @@ pub async fn scan(
     }
     let status = child.wait().await?;
     let code = status.code().unwrap_or(-1);
+    let error = errors.summary();
     // 16 (or no code at all) means robocopy could not get at the source or
     // destination: an empty scan must not be taken as "no changes", or a
     // scheduled task would report success without copying anything.
     if !(0..16).contains(&code) {
-        return Err(std::io::Error::other(match errors.summary() {
-            Some(error) => error,
-            None => format!("robocopy exited with code {code} while scanning (fatal error)"),
-        }));
+        return Err(std::io::Error::other(error.unwrap_or_else(|| {
+            format!("robocopy exited with code {code} while scanning (fatal error)")
+        })));
     }
-    // 8 means some files or folders could not be read. Failing the whole job
-    // over one unreadable folder would leave everything else uncopied, so the
-    // copy goes ahead and reports them.
-    let warning = (code & 8 != 0).then(|| match errors.summary() {
-        Some(error) => format!("part of the source could not be read and will not be copied: {error}"),
+    // 8 means some files or folders, on either side, could not be read.
+    // Robocopy can also report an error and carry on with a lower code: a
+    // destination share it cannot reach exits with 1 and lists every file as
+    // new. Either way the preview has to say so; the copy still goes ahead,
+    // since failing the job over one unreadable folder would leave
+    // everything else uncopied, and reports what it could not do.
+    let warning = match error {
+        Some(error) => Some(format!("robocopy reported a problem while scanning: {error}")),
         // With /NDL an unreadable folder gets no error line while scanning;
         // the copy does print one.
-        None => "part of the source could not be read and will not be copied (the copy's log names it)".into(),
-    });
+        None if code & 8 != 0 => Some(
+            "some files or folders could not be read and will be skipped (the copy's log names them)".into(),
+        ),
+        None => None,
+    };
     // With /NDL folders are not listed, so a new empty folder is only seen in
     // the summary's "Dirs" row (Copied column).
     let dirs_to_create = parse_summary(&tail, code).map_or(0, |s| s.dirs_copied);
@@ -566,8 +636,8 @@ mod tests {
 
     #[test]
     fn error_log_counts_other_errors_and_survives_a_missing_explanation() {
+        assert_eq!(ErrorLog::default().summary(), None);
         let mut log = ErrorLog::default();
-        assert_eq!(log.summary(), None);
         for line in [
             "2026/10/23 00:50:11 ERROR 5 (0x00000005) Copying Directory C:\\src\\private\\",
             "Access is denied.",
@@ -585,6 +655,57 @@ mod tests {
         let mut log = ErrorLog::default();
         log.push("2026/10/23 00:50:12 ERROR 112 (0x00000070) Copying File D:\\big.iso");
         assert_eq!(log.summary().as_deref(), Some("Copying File D:\\big.iso"));
+    }
+
+    /// An error robocopy recovers from on retry is not why the run failed:
+    /// the one it gave up on ("retry limit exceeded") is reported first.
+    #[test]
+    fn error_log_reports_the_error_robocopy_gave_up_on() {
+        let mut log = ErrorLog::default();
+        for line in [
+            "2026/10/23 01:00:00 ERROR 64 (0x00000040) Copying File \\\\nas\\copy\\a.txt",
+            "The specified network name is no longer available.",
+            "Waiting 2 seconds... Retrying...",
+            "\t  \t\t       9\tC:\\src\\a.txt",
+            "2026/10/23 01:00:05 ERROR 5 (0x00000005) Copying File C:\\src\\b.txt",
+            "Access is denied.",
+            "",
+            "ERROR: RETRY LIMIT EXCEEDED.",
+        ] {
+            log.push(line);
+        }
+        assert_eq!(log.summary().as_deref(), Some("Copying File C:\\src\\b.txt: Access is denied."));
+    }
+
+    /// The error word is translated in some languages; the line's shape and
+    /// the retry-limit line in the same word still give the reason away.
+    #[test]
+    fn error_log_reads_translated_robocopy() {
+        let mut german = ErrorLog::default();
+        for line in [
+            "2026/10/23 01:00:00 FEHLER 32 (0x00000020) Datei wird kopiert C:\\src\\offen.txt",
+            "Der Prozess kann nicht auf die Datei zugreifen, da sie von einem anderen Prozess verwendet wird.",
+            "FEHLER: ÜBERSCHREITUNG DES WIEDERHOLUNGSLIMITS.",
+        ] {
+            german.push(line);
+        }
+        assert_eq!(
+            german.summary().as_deref(),
+            Some(
+                "Datei wird kopiert C:\\src\\offen.txt: Der Prozess kann nicht auf die Datei \
+                 zugreifen, da sie von einem anderen Prozess verwendet wird."
+            )
+        );
+
+        let mut french = ErrorLog::default();
+        for line in [
+            "2026/10/23 01:00:00 ERREUR 5 (0x00000005) Copie du fichier C:\\src\\b.txt",
+            "Accès refusé.",
+            "ERREUR : LIMITE DE NOUVELLES TENTATIVES DÉPASSÉE.",
+        ] {
+            french.push(line);
+        }
+        assert_eq!(french.summary().as_deref(), Some("Copie du fichier C:\\src\\b.txt: Accès refusé."));
     }
 
     #[test]

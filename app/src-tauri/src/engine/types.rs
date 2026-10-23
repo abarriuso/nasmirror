@@ -257,8 +257,9 @@ pub enum JobEvent {
         job_id: String,
         #[serde(flatten)]
         totals: ScanTotals,
-        /// Parts of the tree robocopy could not read (exit code 8): the rest
-        /// can still be copied.
+        /// A problem robocopy reported while scanning (part of the tree it
+        /// could not read, a destination it could not reach): what it could
+        /// read can still be copied.
         warning: Option<String>,
     },
     Progress(ProgressSample),

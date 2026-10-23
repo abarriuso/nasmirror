@@ -1,5 +1,65 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatDuration, formatEtaRange, formatList, formatSpeed, parseList } from './format'
+import {
+  copyProgress,
+  formatBytes,
+  formatDuration,
+  formatEtaRange,
+  formatList,
+  formatSpeed,
+  parseList,
+  secondsLeft,
+} from './format'
+
+describe('copyProgress', () => {
+  it('averages the share of bytes and of files done', () => {
+    // 50 small files of 56 done, but almost none of the bytes.
+    expect(copyProgress(341, 240_000_000, 50, 56)).toBeCloseTo(0.446, 3)
+    expect(copyProgress(100, 100, 4, 4)).toBe(1)
+  })
+
+  it('uses whichever total is known', () => {
+    expect(copyProgress(0, 0, 3, 4)).toBe(0.75)
+    expect(copyProgress(50, 100, 0, 0)).toBe(0.5)
+    expect(copyProgress(0, 0, 0, 0)).toBe(0)
+  })
+})
+
+describe('secondsLeft', () => {
+  it('extrapolates the pace of the window', () => {
+    // 10% more in 10 s, 50% left: 50 s.
+    const samples = [
+      { tMs: 0, progress: 0.3 },
+      { tMs: 10_000, progress: 0.4 },
+      { tMs: 20_000, progress: 0.5 },
+    ]
+    expect(secondsLeft(samples, 10_000)).toBeCloseTo(50, 6)
+    expect(secondsLeft(samples, 60_000)).toBeCloseTo(50, 6)
+  })
+
+  it('reads a run of small files as progress, unlike bytes alone', () => {
+    // Robocopy's 50 notes (341 B of 240 MB) in the first second: the bytes
+    // pace gave 313 h; the mixed one gives about a second.
+    const at = (tMs: number, bytes: number, files: number) => ({
+      tMs,
+      progress: copyProgress(bytes, 240_000_000, files, 56),
+    })
+    expect(secondsLeft([at(0, 0, 0), at(1000, 341, 50)], 10_000)).toBeLessThan(2)
+  })
+
+  it('has no answer without a pace', () => {
+    expect(secondsLeft([], 10_000)).toBe(0)
+    expect(secondsLeft([{ tMs: 0, progress: 0.2 }], 10_000)).toBe(0)
+    expect(
+      secondsLeft(
+        [
+          { tMs: 0, progress: 0.2 },
+          { tMs: 5000, progress: 0.2 },
+        ],
+        10_000,
+      ),
+    ).toBe(0)
+  })
+})
 
 describe('formatBytes', () => {
   it('uses whole bytes below 1 KB', () => {

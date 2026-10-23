@@ -55,3 +55,35 @@ export function parseList(text: string): string[] {
 export function formatList(items: string[]): string {
   return items.map((item) => (/\s/.test(item) ? `"${item}"` : item)).join(' ')
 }
+
+/**
+ * How far a copy has got, from 0 to 1. Bytes alone mislead while robocopy
+ * works through many small files (each takes time but moves few bytes), and
+ * files alone while it copies a few large ones: the average of both is a
+ * steadier basis for the time left.
+ */
+export function copyProgress(
+  bytesDone: number,
+  bytesTotal: number,
+  filesDone: number,
+  filesTotal: number,
+): number {
+  const parts: number[] = []
+  if (bytesTotal > 0) parts.push(Math.min(1, bytesDone / bytesTotal))
+  if (filesTotal > 0) parts.push(Math.min(1, filesDone / filesTotal))
+  return parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : 0
+}
+
+/**
+ * Seconds left at the pace the samples of the last `windowMs` show
+ * (`progress` as from `copyProgress`), or 0 while there is no pace to go by.
+ */
+export function secondsLeft(samples: { tMs: number; progress: number }[], windowMs: number): number {
+  if (samples.length < 2) return 0
+  const last = samples[samples.length - 1]
+  const first = samples.find((s) => s.tMs >= last.tMs - windowMs) ?? samples[0]
+  const gained = last.progress - first.progress
+  const seconds = (last.tMs - first.tMs) / 1000
+  if (gained <= 0 || seconds <= 0) return 0
+  return ((1 - last.progress) * seconds) / gained
+}

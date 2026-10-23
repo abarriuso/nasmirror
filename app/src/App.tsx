@@ -9,7 +9,7 @@ import { HistoryPanel } from './components/HistoryPanel'
 import { notifyFinished } from './notify'
 import { askToConfirm, showError } from './dialogs'
 import type { SpeedSample } from './components/SpeedChart'
-import { formatBytes } from './format'
+import { copyProgress, formatBytes } from './format'
 import './App.css'
 
 type View =
@@ -108,15 +108,18 @@ export default function App() {
         }
         lastBytesRef.current = { atMs: now, bytes: event.bytes_done }
         setJob((j) => {
-          const samples = [...j.samples, { tMs: now, bytesPerSec }]
+          const bytesTotal = Math.max(j.bytesTotal, event.bytes_total)
+          const filesTotal = Math.max(j.filesTotal, event.files_total)
+          const progress = copyProgress(event.bytes_done, bytesTotal, event.files_done, filesTotal)
+          const samples = [...j.samples, { tMs: now, bytesPerSec, progress }]
           const cutoff = now - 65_000
           while (samples.length > 1 && samples[0].tMs < cutoff) samples.shift()
           return {
             ...j,
             bytesDone: event.bytes_done,
-            bytesTotal: Math.max(j.bytesTotal, event.bytes_total),
+            bytesTotal,
             filesDone: event.files_done,
-            filesTotal: Math.max(j.filesTotal, event.files_total),
+            filesTotal,
             currentFile: event.current_file || j.currentFile,
             samples,
           }

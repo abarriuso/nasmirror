@@ -4,6 +4,8 @@ export interface SpeedSample {
   /** Date.now() when the sample reached the frontend (not the backend time). */
   tMs: number
   bytesPerSec: number
+  /** How far the copy had got, from 0 to 1 (see `copyProgress`). */
+  progress: number
 }
 
 interface Props {

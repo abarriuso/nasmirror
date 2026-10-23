@@ -31,13 +31,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Delete** (job or history entry) and **Stop** never asked for
   confirmation: the dialog plugin replaces `window.confirm` with a function
   that always reads as "yes". They now ask in a native dialog, and anything
-  but an explicit OK keeps the job, entry or copy.
+  but an explicit OK keeps the job, entry or copy. Lint (`no-alert`) keeps
+  `alert` and `confirm` from coming back.
 - One unreadable folder anywhere in the source (robocopy exit code 8 while
   scanning) aborted the whole job before copying anything. The rest is now
   copied; the preview warns, and the result names what could not be read.
+  The preview also warns when robocopy reports a destination it cannot
+  reach, instead of promising to copy every file there.
 - A failed copy only said "Backup failed": the result and the history now
-  carry robocopy's own explanation (e.g. the file in use and by what), and a
-  failed scan says why instead of "exited with code 16".
+  carry robocopy's own explanation (e.g. the file in use and by what), in
+  any Windows language, naming first the file robocopy gave up on rather
+  than one it recovered from on retry. A failed scan says why instead of
+  "exited with code 16".
+- The progress counted a file that failed as copied, and a retried one once
+  per attempt; files now count once robocopy has moved on from them.
 - A new empty folder, when it was the only change, ended as "no changes"
   and was never created. The preview counts new folders too.
 - A path that is not a full path (`\nas\share`, one backslash short, or a
@@ -45,12 +52,14 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the app's folder. It is now rejected before anything runs.
 - Confirming the preview scanned the whole tree a second time; the copy now
   reuses what the preview found and starts at once.
-- A cancelled copy was recorded as 0 files and 0 B; it now shows what was
-  copied before stopping.
+- A cancelled copy was recorded as 0 files and 0 B; it now shows the files
+  copied before stopping, without the folder count and exit code it cannot
+  know.
 - In mirror mode the result listed the deleted extras as "Files only in the
   destination"; it now says they were deleted.
-- The time left showed nonsense (hundreds of hours) during the first
-  seconds of a copy of small files; it now waits for 10 s of data.
+- The time left showed nonsense (hundreds of hours) while robocopy worked
+  through small files, since it went by bytes alone; it now follows files
+  and bytes together, and waits for 10 s of data.
 - The job form saved a network login with no user name and a Wake-on-LAN
   setting with no valid MAC, and kept spaces around the paths. It now says
   what is missing, and the job list shows the destination on its own line.

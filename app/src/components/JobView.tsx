@@ -2,7 +2,7 @@ import { memo } from 'react'
 import type { JobPhase } from '../types'
 import { PHASE_LABEL } from '../phases'
 import { SpeedChart, type SpeedSample } from './SpeedChart'
-import { formatBytes, formatEtaRange, formatSpeed } from '../format'
+import { formatBytes, formatEtaRange, formatSpeed, secondsLeft } from '../format'
 
 interface Props {
   phase: JobPhase
@@ -39,15 +39,12 @@ export const JobView = memo(function JobView({
 }: Props) {
   const pct = bytesTotal > 0 ? Math.min(100, (bytesDone / bytesTotal) * 100) : 0
   const speed10s = recentAvgSpeed(samples, 10_000)
-  const speed60s = recentAvgSpeed(samples, 60_000)
-  const remainingBytes = Math.max(0, bytesTotal - bytesDone)
-  const etaLow = speed60s > 0 ? remainingBytes / speed60s : 0
-  const etaHigh = speed10s > 0 ? remainingBytes / speed10s : etaLow
-  // The first seconds are no basis for an estimate: a run of small files
-  // moves few bytes and once read as "313 h left".
+  // From the pace of files and bytes together, over the last 10 s and 60 s:
+  // estimated from bytes alone, a run of small files once read "313 h left".
+  const etas = [secondsLeft(samples, 10_000), secondsLeft(samples, 60_000)].filter((s) => s > 0)
+  // The first seconds are still no basis for an estimate.
   const copyingForMs = samples.length > 1 ? samples[samples.length - 1].tMs - samples[0].tMs : 0
-  const showEta =
-    phase === 'copying' && bytesDone > 0 && copyingForMs >= ETA_AFTER_MS && (etaLow > 0 || etaHigh > 0)
+  const showEta = phase === 'copying' && copyingForMs >= ETA_AFTER_MS && etas.length > 0
 
   return (
     <div className="job-view">
@@ -55,7 +52,9 @@ export const JobView = memo(function JobView({
         <div className="job-view__pct">{phase === 'copying' ? `${pct.toFixed(0)}%` : PHASE_LABEL[phase]}</div>
         <div className="job-view__meta">
           {phase === 'copying' && <div className="job-view__phase">{PHASE_LABEL[phase]}</div>}
-          {showEta && <div className="job-view__eta">{formatEtaRange(etaLow, etaHigh)} left</div>}
+          {showEta && (
+            <div className="job-view__eta">{formatEtaRange(Math.min(...etas), Math.max(...etas))} left</div>
+          )}
         </div>
       </div>
 
