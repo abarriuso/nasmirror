@@ -165,7 +165,7 @@ pub struct ScanTotals {
 }
 
 /// What mirror mode would delete under one item at the top of the
-/// destination: "COSAS old\ — 210,000 files, 20 GB" says what a bare count
+/// destination: "Photos old\ — 210,000 files, 20 GB" says what a bare count
 /// of deletions hides.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DeletionGroup {

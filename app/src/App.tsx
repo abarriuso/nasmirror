@@ -758,7 +758,7 @@ function Route({ source, destination }: { source: string; destination: string })
   )
 }
 
-/** The last folder name of a path: `C:\COSAS\` → `COSAS`. */
+/** The last folder name of a path: `C:\Photos\` → `Photos`. */
 function folderName(path: string): string {
   return (
     path

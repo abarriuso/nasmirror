@@ -52,25 +52,25 @@ describe('formatElapsed', () => {
 
 describe('relativePath', () => {
   it('drops the part every path of the source shares', () => {
-    expect(relativePath('C:\\COSAS', 'C:\\COSAS\\PROYECTOS\\app\\')).toBe('…\\PROYECTOS\\app')
-    expect(relativePath('C:\\COSAS\\', 'c:\\cosas\\x')).toBe('…\\x')
+    expect(relativePath('C:\\Photos', 'C:\\Photos\\2026\\app\\')).toBe('…\\2026\\app')
+    expect(relativePath('C:\\Photos\\', 'c:\\photos\\x')).toBe('…\\x')
   })
 
   it('leaves other paths whole', () => {
-    expect(relativePath('C:\\COSAS', 'C:\\COSAS2\\x')).toBe('C:\\COSAS2\\x')
-    expect(relativePath('C:\\COSAS', 'C:\\COSAS\\')).toBe('C:\\COSAS\\')
+    expect(relativePath('C:\\Photos', 'C:\\Photos2\\x')).toBe('C:\\Photos2\\x')
+    expect(relativePath('C:\\Photos', 'C:\\Photos\\')).toBe('C:\\Photos\\')
   })
 })
 
 describe('isRootPath', () => {
   it('spots a drive or share root, however it is written', () => {
-    for (const p of ['D:\\', 'd:', '\\\\192.168.1.208\\copy', '\\\\nas\\share\\', '//nas/share']) {
+    for (const p of ['D:\\', 'd:', '\\\\nas\\copy', '\\\\nas\\share\\', '//nas/share']) {
       expect(isRootPath(p), p).toBe(true)
     }
   })
 
   it('leaves folders inside them alone', () => {
-    for (const p of ['D:\\Backups', '\\\\192.168.1.208\\copy\\COSAS', '\\\\nas', '']) {
+    for (const p of ['D:\\Backups', '\\\\nas\\copy\\Photos', '\\\\nas', '']) {
       expect(isRootPath(p), p).toBe(false)
     }
   })
@@ -78,7 +78,7 @@ describe('isRootPath', () => {
 
 describe('isFullPath', () => {
   it('takes a drive path or a network share', () => {
-    for (const p of ['D:\\', 'D:/Backups', '  C:\\COSAS ', '\\\\nas\\share', '//nas/share/x']) {
+    for (const p of ['D:\\', 'D:/Backups', '  C:\\Photos ', '\\\\nas\\share', '//nas/share/x']) {
       expect(isFullPath(p), p).toBe(true)
     }
   })

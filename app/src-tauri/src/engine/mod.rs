@@ -1236,7 +1236,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            validate_paths(r"\COSAS", r"D:\mirror"),
+            validate_paths(r"\Photos", r"D:\mirror"),
             Err(PathError::NotAbsolute(_))
         ));
         for dst in [r"D:\", "D:/mirror", r"\\nas\share", "//nas/share/copy"] {
@@ -1337,21 +1337,22 @@ mod tests {
 
     #[test]
     fn deletion_guard_stops_what_cost_a_backup() {
-        // The real case: C:\COSAS mirrored into the share's root, which held
-        // the previous copy in COSAS\ next to COSAS old\ and COSAS old old\.
+        // The case it comes from: C:\Photos mirrored into the share's root,
+        // which held the previous copy in Photos\ next to Photos old\ and
+        // Photos old old\.
         let groups = [
-            group("COSAS", true, 210_000, 20 << 30),
-            group("COSAS old", true, 150_000, 15 << 30),
+            group("Photos", true, 210_000, 20 << 30),
+            group("Photos old", true, 150_000, 15 << 30),
         ];
         let reason = deletion_guard(
-            r"C:\COSAS",
-            r"\\192.168.1.208\copy",
+            r"C:\Photos",
+            r"\\nas\copy",
             &deleting(400_000, 40 << 30),
             &groups,
         )
         .expect("must ask");
-        assert!(reason.contains("folder named \"COSAS\""), "{reason}");
-        assert!(reason.contains(r"\\192.168.1.208\copy\COSAS"), "{reason}");
+        assert!(reason.contains("folder named \"Photos\""), "{reason}");
+        assert!(reason.contains(r"\\nas\copy\Photos"), "{reason}");
 
         // Any deletion at the root of a share or a drive.
         let reason = deletion_guard(r"C:\data", r"\\nas\share", &deleting(3, 10), &[group("x.txt", false, 1, 10)])
@@ -1375,11 +1376,11 @@ mod tests {
     #[tokio::test]
     async fn an_unattended_run_refuses_to_delete_an_earlier_copy() {
         let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
-        let src = base.join("COSAS");
+        let src = base.join("Photos");
         let dst = base.join("nas");
-        std::fs::create_dir_all(src.join("PROYECTOS")).unwrap();
-        std::fs::write(src.join(r"PROYECTOS\a.txt"), "a").unwrap();
-        for old in [r"COSAS\PROYECTOS", r"COSAS old\PROYECTOS"] {
+        std::fs::create_dir_all(src.join("2026")).unwrap();
+        std::fs::write(src.join(r"2026\a.txt"), "a").unwrap();
+        for old in [r"Photos\2026", r"Photos old\2026"] {
             std::fs::create_dir_all(dst.join(old)).unwrap();
             std::fs::write(dst.join(old).join("a.txt"), "a").unwrap();
         }
@@ -1407,16 +1408,16 @@ mod tests {
         assert_eq!(result.outcome, Outcome::Failed);
         let error = result.error.unwrap_or_default();
         assert!(error.starts_with("nothing was copied or deleted"), "{error}");
-        assert!(dst.join(r"COSAS\PROYECTOS\a.txt").is_file());
-        assert!(dst.join(r"COSAS old\PROYECTOS\a.txt").is_file());
-        assert!(!dst.join("PROYECTOS").exists(), "nothing may be copied either");
+        assert!(dst.join(r"Photos\2026\a.txt").is_file());
+        assert!(dst.join(r"Photos old\2026\a.txt").is_file());
+        assert!(!dst.join("2026").exists(), "nothing may be copied either");
         // The window gets the same reason and what would go, folder by folder.
         let deletions = events.iter().find_map(|e| match e {
             JobEvent::ScanResult { deletions, confirm_deletions: Some(_), .. } => Some(deletions.clone()),
             _ => None,
         });
         let names: Vec<String> = deletions.expect("a scan result asking to confirm").into_iter().map(|g| g.name).collect();
-        assert!(names.contains(&"COSAS".to_string()) && names.contains(&"COSAS old".to_string()), "{names:?}");
+        assert!(names.contains(&"Photos".to_string()) && names.contains(&"Photos old".to_string()), "{names:?}");
 
         let _ = std::fs::remove_dir_all(&base);
     }

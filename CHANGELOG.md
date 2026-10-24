@@ -21,7 +21,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - **Mirror mode deleted an earlier copy without a clear warning.** A job
   pointed at the root of a share (`\\nas\copy`), while its earlier copy lived
-  in `\\nas\copy\COSAS`, deleted that copy and everything else on the share,
+  in `\\nas\copy\Photos`, deleted that copy and everything else on the share,
   and the preview only gave a count. Now:
   - the preview lists what would be deleted, folder by folder, with sizes;
   - when the destination has a folder named like the source, it says so and

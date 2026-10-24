@@ -98,7 +98,7 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
- * `path` shown from `base` on (`…\PROYECTOS\app`), or whole when it is not
+ * `path` shown from `base` on (`…\2026\trip`), or whole when it is not
  * inside `base`: the shared start of every path in a scan only takes room.
  */
 export function relativePath(base: string, path: string): string {
