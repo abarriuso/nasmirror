@@ -159,6 +159,20 @@ pub struct ScanTotals {
     /// file inside them they show up nowhere else.
     #[serde(default)]
     pub dirs_to_create: u64,
+    /// Size of the files `files_to_delete` counts (mirror mode).
+    #[serde(default)]
+    pub bytes_to_delete: u64,
+}
+
+/// What mirror mode would delete under one item at the top of the
+/// destination: "COSAS old\ — 210,000 files, 20 GB" says what a bare count
+/// of deletions hides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeletionGroup {
+    pub name: String,
+    pub is_dir: bool,
+    pub files: u64,
+    pub bytes: u64,
 }
 
 impl ScanTotals {
@@ -246,6 +260,12 @@ pub struct ProgressSample {
     pub current_file: String,
     pub current_file_bytes_done: u64,
     pub current_file_bytes_total: u64,
+    /// Files and folders deleted from the destination so far (mirror mode).
+    /// A copy can spend minutes deleting and moving no bytes at all.
+    #[serde(default)]
+    pub items_deleted: u64,
+    #[serde(default)]
+    pub bytes_deleted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,6 +296,14 @@ pub enum JobEvent {
         /// could not read, a destination it could not reach): what it could
         /// read can still be copied.
         warning: Option<String>,
+        /// What mirror mode would delete, by item at the top of the
+        /// destination, largest first.
+        #[serde(default)]
+        deletions: Vec<DeletionGroup>,
+        /// Why these deletions need an explicit yes before copying (see
+        /// `deletion_guard`); `None` when they are routine.
+        #[serde(default)]
+        confirm_deletions: Option<String>,
     },
     Progress(ProgressSample),
     LogLine {

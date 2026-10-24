@@ -87,7 +87,7 @@ export function ResultsPanel({ result, profile, steps, onClose, onOpenLogDir }: 
           <tbody>
             {!stopped && (
               <tr>
-                <td>Folders copied</td>
+                <td>Folders created or updated</td>
                 <td>{formatCount(result.summary.dirs_copied)}</td>
               </tr>
             )}

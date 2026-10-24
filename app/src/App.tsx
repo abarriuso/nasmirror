@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { api, onJobEvent } from './api'
-import type { HistoryEntry, JobEvent, JobPhase, JobResult, Outcome, Profile, ScanTotals } from './types'
+import type {
+  DeletionGroup,
+  HistoryEntry,
+  JobEvent,
+  JobPhase,
+  JobResult,
+  Outcome,
+  Profile,
+  ScanTotals,
+} from './types'
 import { ProfileForm } from './components/ProfileForm'
 import { JobView } from './components/JobView'
 import { JobSteps, type JobStep, type ScanSnapshot, type StepEnd } from './components/JobSteps'
@@ -10,7 +20,15 @@ import { OUTCOME_BADGE } from './outcomes'
 import { notifyFinished } from './notify'
 import { askToConfirm, showError } from './dialogs'
 import type { SpeedSample } from './components/SpeedChart'
-import { copyProgress, formatBytes, formatDuration, formatElapsed, formatWhen, plural } from './format'
+import {
+  copyProgress,
+  formatBytes,
+  formatCount,
+  formatDuration,
+  formatElapsed,
+  formatWhen,
+  plural,
+} from './format'
 import './App.css'
 
 type View =
@@ -26,6 +44,9 @@ type View =
       jobId: string
       scan: ScanTotals
       warning: string | null
+      deletions: DeletionGroup[]
+      /** Why the deletions need an explicit yes; `null` when routine. */
+      confirmDeletions: string | null
     }
   | { kind: 'job'; profile: Profile; jobId: string }
   | { kind: 'result'; result: JobResult; profile: Profile }
@@ -40,6 +61,10 @@ interface JobState {
   bytesTotal: number
   filesDone: number
   filesTotal: number
+  /** Mirror mode: deleted from the destination so far, and the scan's count. */
+  itemsDeleted: number
+  bytesDeleted: number
+  itemsToDelete: number
   currentFile: string
   samples: SpeedSample[]
 }
@@ -53,6 +78,9 @@ function emptyJobState(): JobState {
     bytesTotal: 0,
     filesDone: 0,
     filesTotal: 0,
+    itemsDeleted: 0,
+    bytesDeleted: 0,
+    itemsToDelete: 0,
     currentFile: '',
     samples: [],
   }
@@ -77,7 +105,7 @@ export default function App() {
   const [loadingProfiles, setLoadingProfiles] = useState(true)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [cancelling, setCancelling] = useState(false)
-  const lastBytesRef = useRef<{ atMs: number; bytes: number } | null>(null)
+  const lastBytesRef = useRef<{ atMs: number; bytes: number; items: number } | null>(null)
   const activeJobIdRef = useRef<string | null>(null)
   // Cancel pressed before startJob returned the job's id.
   const cancelRequestedRef = useRef(false)
@@ -97,8 +125,29 @@ export default function App() {
       .finally(() => setLoadingProfiles(false))
     refreshHistory()
     const unlisten = onJobEvent(handleJobEvent)
+    // Closing the window ends robocopy with it (it is tied to NASMirror):
+    // with a job running, ask first, and stop the job properly so its
+    // history entry says it was cancelled.
+    const window = getCurrentWindow()
+    const unlistenClose = window.onCloseRequested(async (event) => {
+      if (!pendingContext.current) return
+      event.preventDefault()
+      const ok = await askToConfirm(
+        'A job is running. Closing NASMirror stops it; files already copied are kept. Close anyway?',
+        'Stop and close',
+      )
+      if (!ok) return
+      const jobId = activeJobIdRef.current
+      if (jobId) await api.cancelJob(jobId)
+      // Wait (briefly) for the job to record how it ended.
+      for (let i = 0; i < 50 && pendingContext.current; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
+      await window.destroy()
+    })
     return () => {
       unlisten.then((fn) => fn())
+      unlistenClose.then((fn) => fn())
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -138,6 +187,7 @@ export default function App() {
               bytes_to_copy: event.bytes_to_copy,
               files_to_delete: event.files_to_delete,
               dirs_to_create: event.dirs_to_create,
+              bytes_to_delete: event.bytes_to_delete,
             },
           },
         }))
@@ -147,6 +197,7 @@ export default function App() {
           ...j,
           bytesTotal: event.bytes_to_copy,
           filesTotal: event.files_to_copy,
+          itemsToDelete: event.files_to_delete,
         }))
         pendingScan.current = {
           scan: {
@@ -154,8 +205,11 @@ export default function App() {
             bytes_to_copy: event.bytes_to_copy,
             files_to_delete: event.files_to_delete,
             dirs_to_create: event.dirs_to_create,
+            bytes_to_delete: event.bytes_to_delete,
           },
           warning: event.warning,
+          deletions: event.deletions,
+          confirmDeletions: event.confirm_deletions,
         }
         // The final numbers, folders to create included, for the step list.
         setJob((j) => ({
@@ -170,16 +224,28 @@ export default function App() {
       case 'progress': {
         const now = Date.now()
         const last = lastBytesRef.current
+        // Files copied and things deleted: work that moves few or no bytes
+        // (small files, deletions) still shows on the chart.
+        const items = event.files_done + event.items_deleted
         let bytesPerSec = 0
+        let itemsPerSec = 0
         if (last && now > last.atMs) {
           bytesPerSec = Math.max(0, ((event.bytes_done - last.bytes) / (now - last.atMs)) * 1000)
+          itemsPerSec = Math.max(0, ((items - last.items) / (now - last.atMs)) * 1000)
         }
-        lastBytesRef.current = { atMs: now, bytes: event.bytes_done }
+        lastBytesRef.current = { atMs: now, bytes: event.bytes_done, items }
         setJob((j) => {
           const bytesTotal = Math.max(j.bytesTotal, event.bytes_total)
           const filesTotal = Math.max(j.filesTotal, event.files_total)
-          const progress = copyProgress(event.bytes_done, bytesTotal, event.files_done, filesTotal)
-          const samples = [...j.samples, { tMs: now, bytesPerSec, progress }]
+          const progress = copyProgress(
+            event.bytes_done,
+            bytesTotal,
+            event.files_done,
+            filesTotal,
+            event.items_deleted,
+            j.itemsToDelete,
+          )
+          const samples = [...j.samples, { tMs: now, bytesPerSec, itemsPerSec, progress }]
           const cutoff = now - 65_000
           while (samples.length > 1 && samples[0].tMs < cutoff) samples.shift()
           return {
@@ -188,6 +254,8 @@ export default function App() {
             bytesTotal,
             filesDone: event.files_done,
             filesTotal,
+            itemsDeleted: event.items_deleted,
+            bytesDeleted: event.bytes_deleted,
             currentFile: event.current_file || j.currentFile,
             samples,
           }
@@ -206,7 +274,12 @@ export default function App() {
     }
   }
 
-  const pendingScan = useRef<{ scan: ScanTotals; warning: string | null } | null>(null)
+  const pendingScan = useRef<{
+    scan: ScanTotals
+    warning: string | null
+    deletions: DeletionGroup[]
+    confirmDeletions: string | null
+  } | null>(null)
   const pendingContext = useRef<{
     profile: Profile
     password: string
@@ -233,8 +306,16 @@ export default function App() {
         return
       }
       const found = pendingScan.current ?? {
-        scan: { files_to_copy: 0, bytes_to_copy: 0, files_to_delete: 0, dirs_to_create: 0 },
+        scan: {
+          files_to_copy: 0,
+          bytes_to_copy: 0,
+          files_to_delete: 0,
+          dirs_to_create: 0,
+          bytes_to_delete: 0,
+        },
         warning: null,
+        deletions: [],
+        confirmDeletions: null,
       }
       setView({
         kind: 'preview',
@@ -244,6 +325,8 @@ export default function App() {
         jobId: activeJobIdRef.current ?? '',
         scan: found.scan,
         warning: found.warning,
+        deletions: found.deletions,
+        confirmDeletions: found.confirmDeletions,
       })
       return
     }
@@ -254,8 +337,9 @@ export default function App() {
     refreshHistory()
   }
 
-  async function startPreview(profile: Profile, password: string, resticPassword: string) {
-    if (busy) return
+  /** `again`: called from the preview of the same run, which still reads as busy. */
+  async function startPreview(profile: Profile, password: string, resticPassword: string, again = false) {
+    if (busy && !again) return
     setBusy(true)
     lastBytesRef.current = null
     pendingContext.current = { profile, password, resticPassword, forReal: false }
@@ -328,6 +412,24 @@ export default function App() {
       setBusy(false)
       showError(errorMessage(e))
     }
+  }
+
+  /**
+   * From the preview: points the job at `destination` (the folder that
+   * already holds the copy, say), saves it, and works out the preview again.
+   */
+  async function useDestination(destination: string) {
+    if (view.kind !== 'preview') return
+    const { profile, password, resticPassword } = view
+    const changed = { ...profile, destination }
+    try {
+      setProfiles(await api.saveProfile(changed))
+    } catch (e: unknown) {
+      showError(`Could not save the job: ${errorMessage(e)}`)
+      return
+    }
+    setBusy(false)
+    await startPreview(changed, password, resticPassword, true)
   }
 
   async function cancelJob() {
@@ -425,15 +527,19 @@ export default function App() {
 
         {view.kind === 'preview' && (
           <PreviewPanel
+            key={view.jobId}
             scan={view.scan}
             warning={view.warning}
             source={view.profile.source}
             destination={view.profile.destination}
             mirror={view.profile.mode === 'mirror'}
+            deletions={view.deletions}
+            confirmDeletions={view.confirmDeletions}
             steps={job.steps}
             scanSnapshot={job.scan}
             onCancel={() => { setBusy(false); setView({ kind: 'list' }) }}
             onConfirm={() => confirmAndRun()}
+            onUseDestination={useDestination}
           />
         )}
 
@@ -444,6 +550,9 @@ export default function App() {
             bytesTotal={job.bytesTotal}
             filesDone={job.filesDone}
             filesTotal={job.filesTotal}
+            itemsDeleted={job.itemsDeleted}
+            bytesDeleted={job.bytesDeleted}
+            itemsToDelete={job.itemsToDelete}
             currentFile={job.currentFile}
             samples={job.samples}
             steps={job.steps}
@@ -649,30 +758,57 @@ function Route({ source, destination }: { source: string; destination: string })
   )
 }
 
+/** The last folder name of a path: `C:\COSAS\` → `COSAS`. */
+function folderName(path: string): string {
+  return (
+    path
+      .trim()
+      .replace(/[\\/]+$/, '')
+      .split(/[\\/]/)
+      .pop() ?? ''
+  )
+}
+
 function PreviewPanel({
   scan,
   warning,
   source,
   destination,
   mirror,
+  deletions,
+  confirmDeletions,
   steps,
   scanSnapshot,
   onCancel,
   onConfirm,
+  onUseDestination,
 }: {
   scan: ScanTotals
   warning: string | null
   source: string
   destination: string
   mirror: boolean
+  /** What mirror mode would delete, by item at the top of the destination. */
+  deletions: DeletionGroup[]
+  /** Why the deletions need the box ticked before copying; `null` when routine. */
+  confirmDeletions: string | null
   /** How the preview was worked out, for its details. */
   steps: JobStep[]
   scanSnapshot: ScanSnapshot | null
   onCancel: () => void
   onConfirm: () => void
+  /** Points the job at another destination and previews again. */
+  onUseDestination: (destination: string) => void
 }) {
-  const filesToDelete = scan.files_to_delete
+  const [understood, setUnderstood] = useState(false)
+  const filesToDelete = mirror ? scan.files_to_delete : 0
   const scanStep = steps.find((s) => s.phase === 'scanning')
+  // The destination already holds a folder named like the source, and mirror
+  // mode would delete it: most likely the earlier copy, one level down.
+  const sourceName = folderName(source).toLowerCase()
+  const sameName = deletions.find((g) => g.is_dir && g.name.toLowerCase() === sourceName)
+  const intended = sameName ? `${destination.trim().replace(/[\\/]+$/, '')}\\${sameName.name}` : null
+  const mustConfirm = filesToDelete > 0 && confirmDeletions !== null
   return (
     <div className="preview-panel">
       <h2>Before copying</h2>
@@ -688,13 +824,60 @@ function PreviewPanel({
         :
       </p>
       <Route source={source} destination={destination} />
-      {mirror && filesToDelete > 0 && (
-        <p className="preview-panel__danger">
-          ⚠ Mirror mode:{' '}
-          <strong>{plural(filesToDelete, 'file or folder', 'files or folders')}</strong> will be
-          <strong> deleted</strong> from the destination because{' '}
-          {filesToDelete === 1 ? 'it no longer exists' : 'they no longer exist'} in the source.
-        </p>
+      {intended && (
+        <div className="preview-panel__stop">
+          <p>
+            <strong>
+              The destination already has a folder named “{sameName!.name}”, like the source.
+            </strong>{' '}
+            If it holds your earlier copy, the destination should be that folder. As it is,
+            mirror mode would <strong>delete it</strong> ({plural(sameName!.files, 'file')},{' '}
+            {formatBytes(sameName!.bytes)}) and copy everything again next to it.
+          </p>
+          <button type="button" className="primary" onClick={() => onUseDestination(intended)}>
+            Use {intended} instead
+          </button>
+        </div>
+      )}
+      {filesToDelete > 0 && (
+        <div className="preview-panel__danger">
+          <p>
+            ⚠ Mirror mode will <strong>delete</strong>{' '}
+            <strong>{plural(filesToDelete, 'file or folder', 'files or folders')}</strong> (
+            {formatBytes(scan.bytes_to_delete)}) from the destination, because{' '}
+            {filesToDelete === 1 ? 'it is' : 'they are'} not in the source:
+          </p>
+          <ul className="deletions">
+            {deletions.map((g) => (
+              <li key={g.name}>
+                <code>
+                  {g.name}
+                  {g.is_dir ? '\\' : ''}
+                </code>
+                <span>
+                  {g.is_dir ? `${plural(g.files, 'file')} · ` : ''}
+                  {formatBytes(g.bytes)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {/* The same-name case has its own box above; the others (a root,
+              a large deletion) say here why this needs a yes. */}
+          {mustConfirm && !intended && <p className="deletions__why">This needs a yes: {confirmDeletions}.</p>}
+          {mustConfirm && (
+            <label className="deletions__confirm">
+              <input
+                type="checkbox"
+                checked={understood}
+                onChange={(e) => setUnderstood(e.target.checked)}
+              />
+              <span>
+                Yes, permanently delete these{' '}
+                {plural(filesToDelete, 'file or folder', 'files or folders')} from the destination.
+              </span>
+            </label>
+          )}
+        </div>
       )}
       {warning && <p className="preview-panel__danger">⚠ {warning}</p>}
       {scanStep?.endedMs != null && (
@@ -709,8 +892,13 @@ function PreviewPanel({
       </details>
       <div className="form-actions">
         <button onClick={onCancel}>Cancel</button>
-        <button className={mirror && filesToDelete > 0 ? 'danger' : 'primary'} onClick={onConfirm}>
-          Copy now
+        <button
+          className={filesToDelete > 0 ? 'danger' : 'primary'}
+          disabled={mustConfirm && !understood}
+          title={mustConfirm && !understood ? 'Tick the box above to confirm the deletions' : undefined}
+          onClick={onConfirm}
+        >
+          {filesToDelete > 0 ? `Delete ${formatCount(filesToDelete)} and copy` : 'Copy now'}
         </button>
       </div>
     </div>

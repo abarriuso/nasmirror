@@ -409,7 +409,7 @@ input[type='radio'] {
 }
 .job-view__stats {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: var(--sp-2);
   margin-bottom: var(--sp-4);
 }
@@ -847,4 +847,82 @@ input[type='radio'] {
 .job-step--stopped .job-step__icon,
 .job-step--stopped .job-step__label {
   color: var(--warning);
+}
+
+.speed-chart__legend {
+  display: flex;
+  gap: var(--sp-4);
+  margin-top: var(--sp-1);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+.speed-chart__key::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 2px;
+  margin-right: var(--sp-1);
+  vertical-align: middle;
+}
+.speed-chart__key--bytes::before {
+  background: var(--accent);
+}
+.speed-chart__key--items::before {
+  background: var(--success);
+}
+
+/* What mirror mode would delete, and the warnings around it. */
+.deletions {
+  list-style: none;
+  margin: var(--sp-2) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text);
+  font-size: var(--fs-xs);
+}
+.deletions li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+.deletions code {
+  font-family: Consolas, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.deletions span {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.deletions__confirm {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: flex-start;
+  color: var(--text);
+  font-weight: 600;
+  cursor: pointer;
+}
+.preview-panel__danger p {
+  margin: 0;
+}
+.preview-panel__stop {
+  border: 2px solid var(--danger);
+  background: rgba(248, 113, 113, 0.1);
+  border-radius: var(--radius);
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  align-items: flex-start;
+}
+.preview-panel__stop p {
+  margin: 0;
+}
+.deletions__why {
+  color: var(--text);
+  margin-bottom: var(--sp-2);
 }

@@ -121,6 +121,15 @@ export function isFullPath(path: string): boolean {
 }
 
 /**
+ * The root of a drive (`D:\`) or of a network share (`\\nas\share`):
+ * mirroring into one deletes everything else stored there.
+ */
+export function isRootPath(path: string): boolean {
+  const p = path.trim().replace(/\//g, '\\').replace(/\\+$/, '')
+  return /^[a-z]:$/i.test(p) || /^\\\\[^\\]+\\[^\\]+$/.test(p)
+}
+
+/**
  * How far a copy has got, from 0 to 1. Bytes alone mislead while robocopy
  * works through many small files (each takes time but moves few bytes), and
  * files alone while it copies a few large ones: the average of both is a
@@ -131,10 +140,14 @@ export function copyProgress(
   bytesTotal: number,
   filesDone: number,
   filesTotal: number,
+  /** Mirror mode's deletions, which take time and move no bytes. */
+  deletedDone = 0,
+  deleteTotal = 0,
 ): number {
   const parts: number[] = []
   if (bytesTotal > 0) parts.push(Math.min(1, bytesDone / bytesTotal))
   if (filesTotal > 0) parts.push(Math.min(1, filesDone / filesTotal))
+  if (deleteTotal > 0) parts.push(Math.min(1, deletedDone / deleteTotal))
   return parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : 0
 }
 

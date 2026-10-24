@@ -19,6 +19,25 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The copy log starts with the exact robocopy command.
 
 ### Fixed
+- **Mirror mode deleted an earlier copy without a clear warning.** A job
+  pointed at the root of a share (`\\nas\copy`), while its earlier copy lived
+  in `\\nas\copy\COSAS`, deleted that copy and everything else on the share,
+  and the preview only gave a count. Now:
+  - the preview lists what would be deleted, folder by folder, with sizes;
+  - when the destination has a folder named like the source, it says so and
+    offers to use that folder as the destination, in one click;
+  - deleting from a drive or share root, 1,000 or more items, or 1 GB or
+    more needs a box ticked before the copy (the button reads "Delete N and
+    copy");
+  - an unattended run (`--job`) refuses such deletions, says why and copies
+    nothing;
+  - the job form warns when mirror mode points at a drive or share root.
+- A copy that was only deleting sat at 0% for minutes with a flat chart:
+  deletions are now counted on the bar, in a "Deleted" tile and as the latest
+  item, and the chart shows files copied or deleted per second next to the
+  data rate.
+- Closing the window during a copy stopped it without a word; it now asks,
+  and a confirmed close cancels the job properly first.
 - Closing NASMirror, ending its task or a crash during a scan or a copy left
   robocopy (or restic) running on its own, unseen: still copying, or
   deleting in mirror mode, and competing with the next run for the NAS. They

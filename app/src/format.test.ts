@@ -10,6 +10,7 @@ import {
   formatWhen,
   formatSpeed,
   isFullPath,
+  isRootPath,
   parseList,
   plural,
   relativePath,
@@ -58,6 +59,20 @@ describe('relativePath', () => {
   it('leaves other paths whole', () => {
     expect(relativePath('C:\\COSAS', 'C:\\COSAS2\\x')).toBe('C:\\COSAS2\\x')
     expect(relativePath('C:\\COSAS', 'C:\\COSAS\\')).toBe('C:\\COSAS\\')
+  })
+})
+
+describe('isRootPath', () => {
+  it('spots a drive or share root, however it is written', () => {
+    for (const p of ['D:\\', 'd:', '\\\\192.168.1.208\\copy', '\\\\nas\\share\\', '//nas/share']) {
+      expect(isRootPath(p), p).toBe(true)
+    }
+  })
+
+  it('leaves folders inside them alone', () => {
+    for (const p of ['D:\\Backups', '\\\\192.168.1.208\\copy\\COSAS', '\\\\nas', '']) {
+      expect(isRootPath(p), p).toBe(false)
+    }
   })
 })
 

@@ -46,7 +46,11 @@ to go back in time, use restic, or keep a versioned backup alongside
   refresh rate.
 - **Mirror and add-only modes** — mirror leaves the destination identical to
   the source (deleting whatever is left over); add-only only adds and updates,
-  never deletes.
+  never deletes. Point a mirror at a folder of its own (`\\nas\copy\COSAS`),
+  never at the root of a drive or share. The preview lists what a mirror
+  would delete, folder by folder. Deleting from a root, deleting 1,000 items
+  or 1 GB or more, or deleting a folder named like the source needs an
+  explicit yes, and an unattended run refuses it.
 - **Wake-on-LAN** — if the NAS is off, it wakes it over the network first.
 - **SMB credentials** — connects to network shares with a user name and
   password. The password is never written to disk.
@@ -123,7 +127,7 @@ by hand:
 | Code | Meaning                                                             |
 |------|---------------------------------------------------------------------|
 | 0    | Copy succeeded, or nothing to do                                    |
-| 1    | The copy failed, it could not connect, or the saved jobs could not be read |
+| 1    | The copy failed, it could not connect, the saved jobs could not be read, or a mirror run refused deletions that need a yes in the window (nothing was copied or deleted) |
 | 2    | Cancelled                                                           |
 | 3    | Job not found                                                       |
 | 4    | Finished with warnings (robocopy: attribute differences; restic: some files could not be read) |

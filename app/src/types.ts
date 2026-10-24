@@ -62,6 +62,16 @@ export interface ScanTotals {
   files_to_delete: number
   /** Folders missing from the destination, empty ones included. */
   dirs_to_create: number
+  /** Size of the files `files_to_delete` counts (mirror mode). */
+  bytes_to_delete: number
+}
+
+/** What mirror mode would delete under one item at the top of the destination. */
+export interface DeletionGroup {
+  name: string
+  is_dir: boolean
+  files: number
+  bytes: number
 }
 
 export type JobPhase =
@@ -143,6 +153,9 @@ export interface ProgressSample {
   current_file: string
   current_file_bytes_done: number
   current_file_bytes_total: number
+  /** Files and folders deleted from the destination so far (mirror mode). */
+  items_deleted: number
+  bytes_deleted: number
 }
 
 export type JobEvent =
@@ -165,6 +178,10 @@ export type JobEvent =
       job_id: string
       /** A problem robocopy reported while scanning; what it could read can still be copied. */
       warning: string | null
+      /** What mirror mode would delete, by item at the top of the destination, largest first. */
+      deletions: DeletionGroup[]
+      /** Why these deletions need an explicit yes before copying; `null` when routine. */
+      confirm_deletions: string | null
     } & ScanTotals)
   | ({ type: 'progress' } & ProgressSample)
   | { type: 'log_line'; job_id: string; line: string }

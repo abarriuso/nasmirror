@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 
 use super::console::ConsoleLines;
-use super::types::{AdvancedOptions, CopyMode, RobocopySummary, ScanTotals};
+use super::types::{AdvancedOptions, CopyMode, DeletionGroup, RobocopySummary, ScanTotals};
 
 /// Flags shared by the scan (`/L`) and the actual copy. Deliberately does NOT
 /// include `/XX`: in mirror mode robocopy must report (and count) the files it
@@ -84,7 +84,11 @@ pub enum RcLine {
     },
     /// A file or folder that only exists in the destination. Mirror mode
     /// deletes it; add-only mode just lists it.
-    Extra,
+    Extra {
+        path: String,
+        /// `None` for a folder (robocopy prints -1).
+        bytes: Option<u64>,
+    },
     /// A source folder robocopy has reached (only the scan lists them).
     Dir { path: String },
     Other(String),
@@ -110,13 +114,27 @@ impl LineParser {
         }
     }
 
+    /// The first component of `path` below the destination: the folder (or
+    /// file) at the destination's top level that `path` belongs to, and
+    /// whether it is a folder.
+    pub fn top_level(&self, path: &str) -> Option<(String, bool)> {
+        let rest = path.get(self.dst_prefix.len()..)?;
+        let mut parts = rest.splitn(2, '\\');
+        let name = parts.next().filter(|n| !n.is_empty())?;
+        // "name\" (the folder itself) or "name\more": a folder.
+        Some((name.to_string(), parts.next().is_some()))
+    }
+
     pub fn parse(&self, line: &str) -> RcLine {
         let Some(caps) = file_line_re().captures(line) else {
             return RcLine::Other(line.to_string());
         };
         let path = caps[2].trim();
         if path.to_lowercase().starts_with(&self.dst_prefix) {
-            return RcLine::Extra;
+            return RcLine::Extra {
+                path: path.to_string(),
+                bytes: caps[1].parse::<u64>().ok(),
+            };
         }
         if path.ends_with('\\') {
             return RcLine::Dir {
@@ -316,6 +334,44 @@ pub struct ScanOutcome {
     /// not read (exit code 8), or a destination it could not reach. What it
     /// could read can still be copied.
     pub warning: Option<String>,
+    /// What mirror mode would delete, by item at the top of the destination,
+    /// largest first (at most `DELETION_GROUPS`).
+    pub deletions: Vec<DeletionGroup>,
+}
+
+/// How many top-level items of the destination the preview names.
+const DELETION_GROUPS: usize = 12;
+
+/// Adds up what mirror mode would delete under each item at the top of the
+/// destination.
+#[derive(Default)]
+struct DeletionTally {
+    groups: std::collections::HashMap<String, DeletionGroup>,
+}
+
+impl DeletionTally {
+    fn add(&mut self, parser: &LineParser, path: &str, bytes: Option<u64>) {
+        let Some((name, is_dir)) = parser.top_level(path) else {
+            return;
+        };
+        let group = self.groups.entry(name.to_lowercase()).or_insert(DeletionGroup {
+            name,
+            is_dir,
+            files: 0,
+            bytes: 0,
+        });
+        if let Some(bytes) = bytes {
+            group.files += 1;
+            group.bytes += bytes;
+        }
+    }
+
+    fn largest(self) -> Vec<DeletionGroup> {
+        let mut groups: Vec<DeletionGroup> = self.groups.into_values().collect();
+        groups.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(b.files.cmp(&a.files)));
+        groups.truncate(DELETION_GROUPS);
+        groups
+    }
 }
 
 /// Scans with `/L` (list-only, changes nothing) to know in advance what the
@@ -339,6 +395,7 @@ pub async fn scan(
     let parser = LineParser::new(dst);
 
     let mut found = ScanTotals::default();
+    let mut deletions = DeletionTally::default();
     let mut dirs_scanned = 0u64;
     let mut current_dir = String::new();
     let mut last_report = tokio::time::Instant::now();
@@ -371,8 +428,12 @@ pub async fn scan(
                 found.bytes_to_copy += bytes;
             }
             // Without /PURGE robocopy lists extras but leaves them alone.
-            RcLine::Extra if mode == CopyMode::Mirror => found.files_to_delete += 1,
-            RcLine::Extra => {}
+            RcLine::Extra { path, bytes } if mode == CopyMode::Mirror => {
+                found.files_to_delete += 1;
+                found.bytes_to_delete += bytes.unwrap_or(0);
+                deletions.add(&parser, &path, bytes);
+            }
+            RcLine::Extra { .. } => {}
             RcLine::Dir { path } => {
                 dirs_scanned += 1;
                 current_dir = path;
@@ -419,6 +480,7 @@ pub async fn scan(
     Ok(Some(ScanOutcome {
         totals: found,
         warning,
+        deletions: deletions.largest(),
     }))
 }
 
@@ -571,11 +633,11 @@ mod tests {
         let parser = LineParser::new(" d:/Mirror/ ");
         assert!(matches!(
             parser.parse("\t  \t\t       2\tD:\\mirror\\old.txt"),
-            RcLine::Extra
+            RcLine::Extra { .. }
         ));
         assert!(matches!(
             parser.parse("\t      -1\tD:\\MIRROR\\olddir\\"),
-            RcLine::Extra
+            RcLine::Extra { .. }
         ));
         // A sibling that shares the prefix is not the destination.
         assert!(matches!(
@@ -606,22 +668,32 @@ mod tests {
         let adv = AdvancedOptions::default();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let mirror = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel.clone(), |_, _, _| {})
+        let outcome = scan(&src_s, &dst_s, CopyMode::Mirror, &adv, cancel.clone(), |_, _, _| {})
             .await
             .unwrap()
             .unwrap();
-        let mirror = mirror.totals;
+        let mirror = outcome.totals;
         assert_eq!((mirror.files_to_copy, mirror.bytes_to_copy), (1, 4));
-        // extra.txt, olddir and olddir\y.txt
-        assert_eq!(mirror.files_to_delete, 3);
+        // extra.txt, olddir and olddir\y.txt; 2 + 2 bytes.
+        assert_eq!((mirror.files_to_delete, mirror.bytes_to_delete), (3, 4));
+        // Named by what sits at the top of the destination.
+        let mut groups = outcome.deletions;
+        groups.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(
+            groups,
+            [
+                DeletionGroup { name: "extra.txt".into(), is_dir: false, files: 1, bytes: 2 },
+                DeletionGroup { name: "olddir".into(), is_dir: true, files: 1, bytes: 2 },
+            ]
+        );
 
         let add_only = scan(&src_s, &dst_s, CopyMode::Accumulate, &adv, cancel, |_, _, _| {})
             .await
             .unwrap()
-            .unwrap()
-            .totals;
-        assert_eq!((add_only.files_to_copy, add_only.bytes_to_copy), (1, 4));
-        assert_eq!(add_only.files_to_delete, 0);
+            .unwrap();
+        assert_eq!((add_only.totals.files_to_copy, add_only.totals.bytes_to_copy), (1, 4));
+        assert_eq!(add_only.totals.files_to_delete, 0);
+        assert!(add_only.deletions.is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
     }

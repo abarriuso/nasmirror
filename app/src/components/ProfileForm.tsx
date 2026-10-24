@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { CopyMode, Engine, Profile } from '../types'
 import { emptyRestic, newProfile } from '../types'
-import { formatList, isFullPath, parseList } from '../format'
+import { formatList, isFullPath, isRootPath, parseList } from '../format'
 import { open } from '@tauri-apps/plugin-dialog'
 
 interface Props {
@@ -167,6 +167,17 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
             </div>
           </label>
         ))}
+        {profile.mode === 'mirror' && isRootPath(profile.destination) && (
+          <p className="preview-panel__danger">
+            ⚠ The destination is the root of {profile.destination.trim()}: mirror mode deletes
+            everything else stored there. Give the copy a folder of its own, like{' '}
+            <code>
+              {profile.destination.trim().replace(/[\\/]+$/, '')}\
+              {profile.source.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'Backup'}
+            </code>
+            .
+          </p>
+        )}
       </fieldset>
 
       <fieldset className="mode-picker">
