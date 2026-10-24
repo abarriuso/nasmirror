@@ -142,11 +142,50 @@ pub struct JobRequest {
     /// Scan only (robocopy /L): nothing is copied or deleted.
     #[serde(default)]
     pub dry_run: bool,
+    /// What the preview just found, sent back when the user confirms it. The
+    /// copy then starts at once instead of scanning the whole tree again,
+    /// which on a large source over the network can take minutes.
+    #[serde(default)]
+    pub preview: Option<ScanTotals>,
+}
+
+/// What a robocopy scan (`/L`) found to do.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct ScanTotals {
+    pub files_to_copy: u64,
+    pub bytes_to_copy: u64,
+    pub files_to_delete: u64,
+    /// Folders missing from the destination, empty ones included: with no
+    /// file inside them they show up nowhere else.
+    #[serde(default)]
+    pub dirs_to_create: u64,
+    /// Size of the files `files_to_delete` counts (mirror mode).
+    #[serde(default)]
+    pub bytes_to_delete: u64,
+}
+
+/// What mirror mode would delete under one item at the top of the
+/// destination: "Photos old\ — 210,000 files, 20 GB" says what a bare count
+/// of deletions hides.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeletionGroup {
+    pub name: String,
+    pub is_dir: bool,
+    pub files: u64,
+    pub bytes: u64,
+}
+
+impl ScanTotals {
+    pub fn is_empty(&self) -> bool {
+        self.files_to_copy == 0 && self.files_to_delete == 0 && self.dirs_to_create == 0
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobPhase {
+    /// Validating the source and destination paths.
+    Checking,
     Connecting,
     WakingTarget,
     Scanning,
@@ -221,6 +260,12 @@ pub struct ProgressSample {
     pub current_file: String,
     pub current_file_bytes_done: u64,
     pub current_file_bytes_total: u64,
+    /// Files and folders deleted from the destination so far (mirror mode).
+    /// A copy can spend minutes deleting and moving no bytes at all.
+    #[serde(default)]
+    pub items_deleted: u64,
+    #[serde(default)]
+    pub bytes_deleted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,12 +274,36 @@ pub enum JobEvent {
     Phase {
         job_id: String,
         phase: JobPhase,
+        /// What exactly this step does, for the window to show: the paths,
+        /// the share and user, the command line run.
+        #[serde(default)]
+        detail: Option<String>,
+    },
+    /// The scan so far, a few times a second: with no changes to list,
+    /// robocopy prints nothing for minutes on a large tree.
+    ScanProgress {
+        job_id: String,
+        dirs_scanned: u64,
+        current_dir: String,
+        #[serde(flatten)]
+        totals: ScanTotals,
     },
     ScanResult {
         job_id: String,
-        files_to_copy: u64,
-        bytes_to_copy: u64,
-        files_to_delete: u64,
+        #[serde(flatten)]
+        totals: ScanTotals,
+        /// A problem robocopy reported while scanning (part of the tree it
+        /// could not read, a destination it could not reach): what it could
+        /// read can still be copied.
+        warning: Option<String>,
+        /// What mirror mode would delete, by item at the top of the
+        /// destination, largest first.
+        #[serde(default)]
+        deletions: Vec<DeletionGroup>,
+        /// Why these deletions need an explicit yes before copying (see
+        /// `deletion_guard`); `None` when they are routine.
+        #[serde(default)]
+        confirm_deletions: Option<String>,
     },
     Progress(ProgressSample),
     LogLine {

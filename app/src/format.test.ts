@@ -1,5 +1,146 @@
 import { describe, expect, it } from 'vitest'
-import { formatBytes, formatDuration, formatEtaRange, formatList, formatSpeed, isValidMac, parseList } from './format'
+import {
+  copyProgress,
+  formatBytes,
+  formatCount,
+  formatDuration,
+  formatElapsed,
+  formatEtaRange,
+  formatList,
+  formatWhen,
+  formatSpeed,
+  isFullPath,
+  isRootPath,
+  isValidMac,
+  parseList,
+  plural,
+  relativePath,
+  secondsLeft,
+} from './format'
+
+describe('formatWhen', () => {
+  const today = new Date(2026, 9, 23, 21, 0)
+  it('names today and yesterday', () => {
+    expect(formatWhen('2026-10-23 20:09:07', today)).toBe('today 20:09')
+    expect(formatWhen('2026-10-22 08:05:00', today)).toBe('yesterday 08:05')
+  })
+
+  it('gives the date otherwise, with the year only when it is not this one', () => {
+    expect(formatWhen('2026-09-28 10:55:56', today)).toBe('28 Sept 10:55')
+    expect(formatWhen('2025-12-31 23:59:59', today)).toBe('31 Dec 2025 23:59')
+    expect(formatWhen('not a date', today)).toBe('not a date')
+  })
+})
+
+describe('counts', () => {
+  it('groups thousands and picks the singular for one', () => {
+    expect(formatCount(12345)).toBe('12,345')
+    expect(plural(1, 'file')).toBe('1 file')
+    expect(plural(0, 'file')).toBe('0 files')
+    expect(plural(2048, 'file or folder', 'files or folders')).toBe('2,048 files or folders')
+  })
+})
+
+describe('formatElapsed', () => {
+  it('keeps a tenth of a second while short, then minutes and hours', () => {
+    expect(formatElapsed(420)).toBe('0.4 s')
+    expect(formatElapsed(42_900)).toBe('42 s')
+    expect(formatElapsed(185_000)).toBe('3 min 05 s')
+    expect(formatElapsed(3_720_000)).toBe('1 h 02 min')
+    expect(formatElapsed(-5)).toBe('0.0 s')
+  })
+})
+
+describe('relativePath', () => {
+  it('drops the part every path of the source shares', () => {
+    expect(relativePath('C:\\Photos', 'C:\\Photos\\2026\\app\\')).toBe('…\\2026\\app')
+    expect(relativePath('C:\\Photos\\', 'c:\\photos\\x')).toBe('…\\x')
+  })
+
+  it('leaves other paths whole', () => {
+    expect(relativePath('C:\\Photos', 'C:\\Photos2\\x')).toBe('C:\\Photos2\\x')
+    expect(relativePath('C:\\Photos', 'C:\\Photos\\')).toBe('C:\\Photos\\')
+  })
+})
+
+describe('isRootPath', () => {
+  it('spots a drive or share root, however it is written', () => {
+    for (const p of ['D:\\', 'd:', '\\\\nas\\copy', '\\\\nas\\share\\', '//nas/share']) {
+      expect(isRootPath(p), p).toBe(true)
+    }
+  })
+
+  it('leaves folders inside them alone', () => {
+    for (const p of ['D:\\Backups', '\\\\nas\\copy\\Photos', '\\\\nas', '']) {
+      expect(isRootPath(p), p).toBe(false)
+    }
+  })
+})
+
+describe('isFullPath', () => {
+  it('takes a drive path or a network share', () => {
+    for (const p of ['D:\\', 'D:/Backups', '  C:\\Photos ', '\\\\nas\\share', '//nas/share/x']) {
+      expect(isFullPath(p), p).toBe(true)
+    }
+  })
+
+  it('rejects what Windows would resolve against another folder', () => {
+    for (const p of ['\\nas\\share', 'backup', 'D:backup', 'D:', '\\\\nas', '']) {
+      expect(isFullPath(p), p).toBe(false)
+    }
+  })
+})
+
+describe('copyProgress', () => {
+  it('averages the share of bytes and of files done', () => {
+    // 50 small files of 56 done, but almost none of the bytes.
+    expect(copyProgress(341, 240_000_000, 50, 56)).toBeCloseTo(0.446, 3)
+    expect(copyProgress(100, 100, 4, 4)).toBe(1)
+  })
+
+  it('uses whichever total is known', () => {
+    expect(copyProgress(0, 0, 3, 4)).toBe(0.75)
+    expect(copyProgress(50, 100, 0, 0)).toBe(0.5)
+    expect(copyProgress(0, 0, 0, 0)).toBe(0)
+  })
+})
+
+describe('secondsLeft', () => {
+  it('extrapolates the pace of the window', () => {
+    // 10% more in 10 s, 50% left: 50 s.
+    const samples = [
+      { tMs: 0, progress: 0.3 },
+      { tMs: 10_000, progress: 0.4 },
+      { tMs: 20_000, progress: 0.5 },
+    ]
+    expect(secondsLeft(samples, 10_000)).toBeCloseTo(50, 6)
+    expect(secondsLeft(samples, 60_000)).toBeCloseTo(50, 6)
+  })
+
+  it('reads a run of small files as progress, unlike bytes alone', () => {
+    // Robocopy's 50 notes (341 B of 240 MB) in the first second: the bytes
+    // pace gave 313 h; the mixed one gives about a second.
+    const at = (tMs: number, bytes: number, files: number) => ({
+      tMs,
+      progress: copyProgress(bytes, 240_000_000, files, 56),
+    })
+    expect(secondsLeft([at(0, 0, 0), at(1000, 341, 50)], 10_000)).toBeLessThan(2)
+  })
+
+  it('has no answer without a pace', () => {
+    expect(secondsLeft([], 10_000)).toBe(0)
+    expect(secondsLeft([{ tMs: 0, progress: 0.2 }], 10_000)).toBe(0)
+    expect(
+      secondsLeft(
+        [
+          { tMs: 0, progress: 0.2 },
+          { tMs: 5000, progress: 0.2 },
+        ],
+        10_000,
+      ),
+    ).toBe(0)
+  })
+})
 
 describe('formatBytes', () => {
   it('uses whole bytes below 1 KB', () => {

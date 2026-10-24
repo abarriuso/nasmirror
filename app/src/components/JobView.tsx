@@ -1,8 +1,19 @@
 import { memo } from 'react'
+import { useNow } from '../useNow'
 import type { JobPhase } from '../types'
 import { PHASE_LABEL } from '../phases'
 import { SpeedChart, type SpeedSample } from './SpeedChart'
-import { formatBytes, formatEtaRange, formatSpeed } from '../format'
+import { JobSteps, type JobStep } from './JobSteps'
+import {
+  copyProgress,
+  formatBytes,
+  formatCount,
+  formatElapsed,
+  formatEtaRange,
+  formatSpeed,
+  relativePath,
+  secondsLeft,
+} from '../format'
 
 interface Props {
   phase: JobPhase
@@ -10,10 +21,22 @@ interface Props {
   bytesTotal: number
   filesDone: number
   filesTotal: number
+  /** Mirror mode: deleted from the destination so far, and how many the scan found. */
+  itemsDeleted: number
+  bytesDeleted: number
+  itemsToDelete: number
   currentFile: string
   samples: SpeedSample[]
+  /** What the job has done so far (connecting, copying...), with details. */
+  steps: JobStep[]
+  /** The job's source, to show the latest file from there on. */
+  source: string
+  /** Stop was confirmed and robocopy is being ended. */
+  stopping: boolean
   onCancel: () => void
 }
+
+const ETA_AFTER_MS = 10_000
 
 /** Average speed over the samples from the last `windowMs`. */
 function recentAvgSpeed(samples: SpeedSample[], windowMs: number): number {
@@ -31,25 +54,47 @@ export const JobView = memo(function JobView({
   bytesTotal,
   filesDone,
   filesTotal,
+  itemsDeleted,
+  bytesDeleted,
+  itemsToDelete,
   currentFile,
   samples,
+  steps,
+  source,
+  stopping,
   onCancel,
 }: Props) {
-  const pct = bytesTotal > 0 ? Math.min(100, (bytesDone / bytesTotal) * 100) : 0
+  const startedMs = steps[0]?.startedMs
+  const now = useNow(true, 1000)
+  // Bytes, files and deletions together: a run that is deleting, or copying
+  // small files, moves few bytes but is still getting on.
+  const pct =
+    copyProgress(bytesDone, bytesTotal, filesDone, filesTotal, itemsDeleted, itemsToDelete) * 100
+  // The latest line is a file copied from the source, or one deleted from
+  // the destination.
+  const latestIsCopy = currentFile.toLowerCase().startsWith(source.trim().toLowerCase())
   const speed10s = recentAvgSpeed(samples, 10_000)
-  const speed60s = recentAvgSpeed(samples, 60_000)
-  const remainingBytes = Math.max(0, bytesTotal - bytesDone)
-  const etaLow = speed60s > 0 ? remainingBytes / speed60s : 0
-  const etaHigh = speed10s > 0 ? remainingBytes / speed10s : etaLow
-  const showEta = phase === 'copying' && bytesDone > 0 && (etaLow > 0 || etaHigh > 0)
+  // From the pace of files and bytes together, over the last 10 s and 60 s:
+  // estimated from bytes alone, a run of small files once read "313 h left".
+  const etas = [secondsLeft(samples, 10_000), secondsLeft(samples, 60_000)].filter((s) => s > 0)
+  // The first seconds are still no basis for an estimate.
+  const copyingForMs = samples.length > 1 ? samples[samples.length - 1].tMs - samples[0].tMs : 0
+  const showEta = phase === 'copying' && copyingForMs >= ETA_AFTER_MS && etas.length > 0
 
   return (
     <div className="job-view">
       <div className="job-view__hero">
         <div className="job-view__pct">{phase === 'copying' ? `${pct.toFixed(0)}%` : PHASE_LABEL[phase]}</div>
         <div className="job-view__meta">
-          {phase === 'copying' && <div className="job-view__phase">{PHASE_LABEL[phase]}</div>}
-          {showEta && <div className="job-view__eta">{formatEtaRange(etaLow, etaHigh)} left</div>}
+          {phase === 'copying' && (
+            <div className="job-view__phase">
+              {currentFile && !latestIsCopy ? 'Deleting what is not in the source…' : PHASE_LABEL[phase]}
+            </div>
+          )}
+          <div className="job-view__eta">
+            {startedMs !== undefined && <>{formatElapsed(now - startedMs)} elapsed</>}
+            {showEta && <> · {formatEtaRange(Math.min(...etas), Math.max(...etas))} left</>}
+          </div>
         </div>
       </div>
 
@@ -66,20 +111,35 @@ export const JobView = memo(function JobView({
           style={{ width: `${phase === 'copying' || phase === 'done' ? pct : 0}%` }}
         />
       </div>
-      {currentFile && <div className="job-view__current-file" title={currentFile}>{currentFile}</div>}
+      {/* Robocopy names a file as it finishes it (or, with /MT, as it
+          starts): "latest" fits both. */}
+      {currentFile && (
+        <div className="job-view__current-file" title={currentFile}>
+          {latestIsCopy ? 'Latest: ' : 'Deleted: '}
+          {latestIsCopy ? relativePath(source, currentFile) : currentFile}
+        </div>
+      )}
 
       <div className="job-view__stats" aria-live="polite">
         <Stat label="Transferred" value={formatBytes(bytesDone)} />
         <Stat label="Total" value={formatBytes(bytesTotal)} />
         <Stat label="Current speed" value={formatSpeed(speed10s)} />
-        <Stat label="Files" value={`${filesDone} / ${filesTotal}`} />
+        <Stat label="Files" value={`${formatCount(filesDone)} / ${formatCount(filesTotal)}`} />
+        {itemsToDelete > 0 && (
+          <Stat
+            label={`Deleted (${formatBytes(bytesDeleted)})`}
+            value={`${formatCount(itemsDeleted)} / ${formatCount(itemsToDelete)}`}
+          />
+        )}
       </div>
 
       <SpeedChart samples={samples} />
 
+      <JobSteps steps={steps} scan={null} source={source} />
+
       <div className="job-view__actions">
-        <button type="button" className="danger" onClick={onCancel}>
-          Stop
+        <button type="button" className="danger" disabled={stopping} onClick={onCancel}>
+          {stopping ? 'Stopping…' : 'Stop'}
         </button>
       </div>
     </div>

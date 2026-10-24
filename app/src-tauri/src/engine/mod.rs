@@ -1,3 +1,4 @@
+pub mod children;
 pub mod console;
 pub mod netuse;
 pub mod restic;
@@ -14,8 +15,8 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use types::{
-    Engine, EngineSummary, JobEvent, JobPhase, JobRequest, JobResult,
-    Outcome, Profile, ProgressSample, ResticSummary, RobocopySummary,
+    CopyMode, DeletionGroup, Engine, EngineSummary, JobEvent, JobPhase, JobRequest, JobResult,
+    Outcome, Profile, ProgressSample, ResticSummary, RobocopySummary, ScanTotals,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +25,8 @@ pub enum PathError {
     SourceMissing(String),
     #[error("choose a destination folder")]
     DestinationEmpty,
+    #[error("\"{0}\" is not a full path: write it with its drive (D:\\Backups) or as a network share (\\\\nas\\share)")]
+    NotAbsolute(String),
     #[error("source and destination are the same folder")]
     SameSourceAndDestination,
     #[error("the destination is inside the source folder: that would copy forever")]
@@ -116,11 +119,16 @@ fn resolve_for_compare(path: &str) -> String {
 /// so touching it could block on a sleeping NAS or fail for lack of a login.
 /// `run_job` checks it once the share is reachable.
 pub fn validate_paths(source: &str, destination: &str) -> Result<(), PathError> {
-    if !is_network_path(source) && !Path::new(source).is_dir() {
-        return Err(PathError::SourceMissing(source.to_string()));
-    }
     if destination.trim().is_empty() {
         return Err(PathError::DestinationEmpty);
+    }
+    for path in [source, destination] {
+        if !is_absolute(path) {
+            return Err(PathError::NotAbsolute(path.trim().to_string()));
+        }
+    }
+    if !is_network_path(source) && !Path::new(source).is_dir() {
+        return Err(PathError::SourceMissing(source.to_string()));
     }
     let src_n = resolve_for_compare(source);
     let dst_n = resolve_for_compare(destination);
@@ -139,6 +147,19 @@ pub fn validate_paths(source: &str, destination: &str) -> Result<(), PathError> 
 fn is_network_path(path: &str) -> bool {
     let p = path.trim_start();
     p.starts_with(r"\\") || p.starts_with("//")
+}
+
+/// `D:\folder` or `\\host\share\folder`. Anything else is resolved by Windows
+/// against something the user never typed: `\nas\share` (one backslash short)
+/// against the root of the current drive, `backup` or `D:backup` against the
+/// app's working folder. In mirror mode that is a copy, and deletions, in an
+/// unexpected place.
+fn is_absolute(path: &str) -> bool {
+    if is_network_path(path) {
+        return share_root(path).is_some();
+    }
+    let p = path.trim().as_bytes();
+    p.len() >= 3 && p[0].is_ascii_alphabetic() && p[1] == b':' && matches!(p[2], b'\\' | b'/')
 }
 
 /// `\\host\share` of a network path. Accepts the same spellings as
@@ -165,6 +186,104 @@ fn wol_host_guess(profile: &Profile) -> String {
         .or_else(|| share_root(&profile.source))
         .and_then(|s| wol::guess_host_from_share(&s))
         .unwrap_or_default()
+}
+
+/// The root of a drive (`D:\`) or of a network share (`\\nas\share`):
+/// mirroring into one deletes everything else stored there.
+fn is_root(path: &str) -> bool {
+    let normal = normalize(&lexical_normalize(path));
+    if let Some(share) = share_root(path) {
+        return normal == normalize(&share);
+    }
+    normal.len() == 2 && normal.ends_with(':')
+}
+
+/// `bytes` as the window writes them (`formatBytes`): "9.16 MB", "20.0 GB".
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ if value < 10.0 => format!("{value:.2} {}", UNITS[unit]),
+        _ => format!("{value:.1} {}", UNITS[unit]),
+    }
+}
+
+/// A count as the window writes it (`formatCount`): "12,345".
+fn human_count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Deletions above these need an explicit yes (see `deletion_guard`).
+pub const CONFIRM_DELETIONS_FROM_ITEMS: u64 = 1_000;
+pub const CONFIRM_DELETIONS_FROM_BYTES: u64 = 1 << 30;
+
+/// Why the deletions a mirror run would make need an explicit yes, or
+/// `None` when they are routine (what was removed from the source since the
+/// last run). Mirror mode deletes whatever the destination holds that the
+/// source does not: pointed one level too high, at a share's root instead of
+/// the folder with the previous copy, it deletes that copy and everything
+/// else stored there. The window asks before copying; an unattended run,
+/// with nobody to ask, refuses.
+pub fn deletion_guard(
+    source: &str,
+    destination: &str,
+    totals: &ScanTotals,
+    deletions: &[DeletionGroup],
+) -> Option<String> {
+    if totals.files_to_delete == 0 {
+        return None;
+    }
+    let source_name = Path::new(source.trim().trim_end_matches(['\\', '/']))
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase());
+    if let Some(same) = deletions
+        .iter()
+        .find(|g| g.is_dir && Some(g.name.to_lowercase()) == source_name)
+    {
+        return Some(format!(
+            "the destination already has a folder named \"{}\", like the source, and mirror mode \
+             would delete it ({} files, {}). If it holds an earlier copy, the destination should \
+             be that folder: {}\\{}",
+            same.name,
+            human_count(same.files),
+            human_bytes(same.bytes),
+            destination.trim().trim_end_matches(['\\', '/']),
+            same.name
+        ));
+    }
+    if is_root(destination) {
+        return Some(format!(
+            "the destination is the root of {}: mirror mode would delete everything else stored \
+             there ({} files or folders, {})",
+            destination.trim(),
+            human_count(totals.files_to_delete),
+            human_bytes(totals.bytes_to_delete)
+        ));
+    }
+    if totals.files_to_delete >= CONFIRM_DELETIONS_FROM_ITEMS
+        || totals.bytes_to_delete >= CONFIRM_DELETIONS_FROM_BYTES
+    {
+        return Some(format!(
+            "mirror mode would delete {} files or folders ({}) from the destination",
+            human_count(totals.files_to_delete),
+            human_bytes(totals.bytes_to_delete)
+        ));
+    }
+    None
 }
 
 pub struct JobContext {
@@ -226,6 +345,18 @@ pub async fn run_job(
     let log_path = robocopy::default_log_path(log_dir);
     let _ = std::fs::create_dir_all(log_dir);
 
+    let phase = |phase: JobPhase, detail: String| {
+        emit(JobEvent::Phase {
+            job_id: job_id.clone(),
+            phase,
+            detail: Some(detail),
+        })
+    };
+
+    phase(
+        JobPhase::Checking,
+        format!("{} → {}", profile.source, profile.destination),
+    );
     if let Err(e) = validate_paths(&profile.source, &profile.destination) {
         finish!(
             Outcome::Failed,
@@ -237,15 +368,22 @@ pub async fn run_job(
 
     // ── Wake-on-LAN ──────────────────────────────────────────────
     if let Some(wol) = &profile.wake_on_lan {
-        emit(JobEvent::Phase {
-            job_id: job_id.clone(),
-            phase: JobPhase::WakingTarget,
-        });
         let host = if wol.host.trim().is_empty() {
             wol_host_guess(&profile)
         } else {
             wol.host.trim().to_string()
         };
+        phase(
+            JobPhase::WakingTarget,
+            if host.is_empty() {
+                format!("magic packet to {}; no host to check, so a fixed 12 s wait", wol.mac)
+            } else {
+                format!(
+                    "magic packet to {}, then up to {} s for {host} to answer on port 445 (SMB)",
+                    wol.mac, wol.timeout_secs
+                )
+            },
+        );
         if let Err(e) = wol::wake_and_wait(&wol.mac, &host, wol.timeout_secs, ctx.cancel.clone()).await {
             let outcome = if matches!(e, wol::WolError::Cancelled) {
                 Outcome::Cancelled
@@ -268,10 +406,7 @@ pub async fn run_job(
         None
     };
     if let (Some(share), Some(creds)) = (&share, &profile.credentials) {
-        emit(JobEvent::Phase {
-            job_id: job_id.clone(),
-            phase: JobPhase::Connecting,
-        });
+        phase(JobPhase::Connecting, format!("{share} as {}", creds.user));
         let share_for_msg = share.clone();
         let share = share.clone();
         let user = creds.user.clone();
@@ -359,58 +494,121 @@ pub async fn run_job(
     }
 
     // ── Scan (list-only pass, /L) ────────────────────────────────
-    emit(JobEvent::Phase {
-        job_id: job_id.clone(),
-        phase: JobPhase::Scanning,
-    });
-    let scan = match robocopy::scan(
-        &profile.source,
-        &profile.destination,
-        profile.mode,
-        &profile.advanced,
-        ctx.cancel.clone(),
-    )
-    .await
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            if let Some(share) = &share {
-                netuse::disconnect(share);
-            }
-            finish!(
-                Outcome::Cancelled,
-                None,
-                None,
-                log_path.display().to_string()
-            );
+    // A copy confirmed from the preview reuses what the preview found: its
+    // numbers only drive the progress bar, and robocopy itself decides what
+    // to copy.
+    let preview = req.preview.filter(|_| !dry_run);
+    let scan = if let Some(totals) = preview {
+        robocopy::ScanOutcome {
+            totals,
+            warning: None,
+            deletions: Vec::new(),
         }
-        Err(e) => {
-            if let Some(share) = &share {
-                netuse::disconnect(share);
+    } else {
+        phase(
+            JobPhase::Scanning,
+            robocopy::scan_command_line(
+                &profile.source,
+                &profile.destination,
+                profile.mode,
+                &profile.advanced,
+            ),
+        );
+        match robocopy::scan(
+            &profile.source,
+            &profile.destination,
+            profile.mode,
+            &profile.advanced,
+            ctx.cancel.clone(),
+            |dirs_scanned, current_dir, totals| {
+                emit(JobEvent::ScanProgress {
+                    job_id: job_id.clone(),
+                    dirs_scanned,
+                    current_dir: current_dir.to_string(),
+                    totals,
+                })
+            },
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                if let Some(share) = &share {
+                    netuse::disconnect(share);
+                }
+                finish!(
+                    Outcome::Cancelled,
+                    None,
+                    None,
+                    log_path.display().to_string()
+                );
             }
-            finish!(
-                Outcome::Failed,
-                None,
-                Some(format!("could not scan the copy: {e}")),
-                log_path.display().to_string()
-            );
+            Err(e) => {
+                if let Some(share) = &share {
+                    netuse::disconnect(share);
+                }
+                finish!(
+                    Outcome::Failed,
+                    None,
+                    Some(format!("could not scan the copy: {e}")),
+                    log_path.display().to_string()
+                );
+            }
         }
+    };
+    // Only a fresh scan is judged: a copy confirmed from the preview was
+    // judged there, and confirmed past any warning.
+    let confirm_deletions = if preview.is_some() {
+        None
+    } else {
+        deletion_guard(
+            &profile.source,
+            &profile.destination,
+            &scan.totals,
+            &scan.deletions,
+        )
     };
     emit(JobEvent::ScanResult {
         job_id: job_id.clone(),
-        files_to_copy: scan.files_to_copy,
-        bytes_to_copy: scan.bytes_to_copy,
-        files_to_delete: scan.files_to_delete,
+        totals: scan.totals,
+        warning: scan.warning.clone(),
+        deletions: scan.deletions.clone(),
+        confirm_deletions: confirm_deletions.clone(),
     });
 
-    if scan.files_to_copy == 0 && scan.files_to_delete == 0 {
+    // Unattended (no preview to confirm, not a dry run): large or odd
+    // deletions are refused rather than made with nobody watching.
+    if let Some(reason) = confirm_deletions.as_ref().filter(|_| !dry_run) {
         if let Some(share) = &share {
             netuse::disconnect(share);
         }
         finish!(
-            Outcome::NoChanges,
+            Outcome::Failed,
             None,
+            Some(format!(
+                "nothing was copied or deleted: {reason}. Run the job from the window to see what \
+                 would be deleted and confirm it, or correct the destination."
+            )),
+            log_path.display().to_string()
+        );
+    }
+
+    if scan.totals.is_empty() {
+        if let Some(share) = &share {
+            netuse::disconnect(share);
+        }
+        // Nothing to do in what could be read: a problem robocopy reported
+        // (an unreadable folder, say) is still a failure, as it would be in
+        // the copy.
+        let outcome = if scan.warning.is_some() {
+            Outcome::Failed
+        } else {
+            Outcome::NoChanges
+        };
+        finish!(
+            outcome,
             None,
+            scan.warning.clone(),
             log_path.display().to_string()
         );
     }
@@ -419,19 +617,25 @@ pub async fn run_job(
         if let Some(share) = &share {
             netuse::disconnect(share);
         }
+        // `--dry-run` has no window to show the scan's warning in.
         finish!(
             Outcome::Success,
             None,
-            None,
+            scan.warning.clone(),
             log_path.display().to_string()
         );
     }
 
     // ── Copy ─────────────────────────────────────────────────────
-    emit(JobEvent::Phase {
-        job_id: job_id.clone(),
-        phase: JobPhase::Copying,
-    });
+    phase(
+        JobPhase::Copying,
+        robocopy::copy_command_line(
+            &profile.source,
+            &profile.destination,
+            profile.mode,
+            &profile.advanced,
+        ),
+    );
     let outcome = run_copy(
         &job_id,
         &profile,
@@ -447,8 +651,8 @@ pub async fn run_job(
     }
 
     match outcome {
-        Ok((exit_code, summary)) => {
-            let summary = summary.map(EngineSummary::Robocopy);
+        Ok((exit_code, summary, errors)) => {
+            let summary = Some(EngineSummary::Robocopy(summary));
             if ctx.cancel.load(Ordering::SeqCst) {
                 finish!(
                     Outcome::Cancelled,
@@ -458,10 +662,17 @@ pub async fn run_job(
                 );
             }
             let result_outcome = classify_exit_code(exit_code);
+            // Robocopy explains failures only in its output: without this the
+            // window would just say "failed" and leave the reason in the log.
+            let error = (result_outcome == Outcome::Failed).then(|| {
+                errors.unwrap_or_else(|| {
+                    format!("robocopy exited with code {exit_code}; the log has the details")
+                })
+            });
             finish!(
                 result_outcome,
                 summary,
-                None,
+                error,
                 log_path.display().to_string()
             );
         }
@@ -498,7 +709,7 @@ async fn run_copy(
     log_path: &Path,
     cancel: Arc<AtomicBool>,
     emit: &(impl Fn(JobEvent) + Send + Sync + 'static),
-) -> Result<(i32, Option<RobocopySummary>), String> {
+) -> Result<(i32, RobocopySummary, Option<String>), String> {
     let mut child = robocopy::start_copy(
         &profile.source,
         &profile.destination,
@@ -522,11 +733,33 @@ async fn run_copy(
     let _ = writeln!(log_file, "SRC  : {}", profile.source);
     let _ = writeln!(log_file, "DST  : {}", profile.destination);
     let _ = writeln!(log_file, "MODE : {}", profile.mode.robocopy_flag());
+    let _ = writeln!(
+        log_file,
+        "CMD  : {}",
+        robocopy::copy_command_line(
+            &profile.source,
+            &profile.destination,
+            profile.mode,
+            &profile.advanced
+        )
+    );
     let _ = writeln!(log_file, "{}", "-".repeat(64));
 
     let mut tail: Vec<String> = Vec::new();
+    let mut errors = robocopy::ErrorLog::default();
     let mut bytes_done = 0u64;
     let mut files_done = 0u64;
+    // Size of the last file line, credited once the next file line arrives
+    // (or robocopy ends) with no error in between. A file that fails prints
+    // its line again for every retry: counted on sight, it was counted once
+    // per attempt, and as copied even when it never was.
+    let mut unconfirmed: Option<u64> = None;
+    // In mirror mode each line for something only in the destination is a
+    // deletion: counted, since a run can spend minutes deleting and copying
+    // nothing.
+    let deleting = profile.mode == CopyMode::Mirror;
+    let mut items_deleted = 0u64;
+    let mut bytes_deleted = 0u64;
     let mut current_file = String::new();
     let start = Instant::now();
     let mut last_sample = 0u128;
@@ -540,23 +773,44 @@ async fn run_copy(
         match next.await {
             Ok(Ok(Some(line))) => {
                 let _ = writeln!(log_file, "{line}");
+                errors.push(&line);
                 tail.push(line.clone());
                 if tail.len() > 80 {
                     tail.remove(0);
                 }
                 match parser.parse(&line) {
                     robocopy::RcLine::File { bytes, path } => {
-                        bytes_done += bytes;
-                        files_done += 1;
+                        if let Some(done) = unconfirmed.replace(bytes) {
+                            bytes_done += done;
+                            files_done += 1;
+                        }
                         current_file = path;
                     }
                     // Deleted (mirror) or left alone (add-only): not part of
-                    // the bytes being copied.
-                    robocopy::RcLine::Extra => {}
-                    robocopy::RcLine::Other(_) => {}
+                    // the bytes being copied. Folders are not listed (/NDL).
+                    robocopy::RcLine::Extra { path, bytes } => {
+                        if deleting {
+                            items_deleted += 1;
+                            bytes_deleted += bytes.unwrap_or(0);
+                            current_file = path;
+                        }
+                    }
+                    robocopy::RcLine::Dir { .. } => {}
+                    robocopy::RcLine::Other(line) => {
+                        if robocopy::is_error_line(&line) {
+                            unconfirmed = None;
+                        }
+                    }
                 }
             }
-            Ok(Ok(None)) => break, // EOF: robocopy has exited
+            Ok(Ok(None)) => {
+                // EOF: robocopy has exited, so its last file is done.
+                if let Some(done) = unconfirmed.take() {
+                    bytes_done += done;
+                    files_done += 1;
+                }
+                break;
+            }
             Ok(Err(e)) => {
                 let _ = writeln!(log_file, "[read error: {e}]");
             }
@@ -570,12 +824,14 @@ async fn run_copy(
                 job_id: job_id.to_string(),
                 at_ms: now_ms as u64,
                 bytes_done,
-                bytes_total: scan.bytes_to_copy.max(bytes_done),
+                bytes_total: scan.totals.bytes_to_copy.max(bytes_done),
                 files_done,
-                files_total: scan.files_to_copy.max(files_done),
+                files_total: scan.totals.files_to_copy.max(files_done),
                 current_file: current_file.clone(),
                 current_file_bytes_done: 0,
                 current_file_bytes_total: 0,
+                items_deleted,
+                bytes_deleted,
             }));
         }
     }
@@ -591,12 +847,14 @@ async fn run_copy(
         job_id: job_id.to_string(),
         at_ms: start.elapsed().as_millis() as u64,
         bytes_done,
-        bytes_total: scan.bytes_to_copy.max(bytes_done),
+        bytes_total: scan.totals.bytes_to_copy.max(bytes_done),
         files_done,
-        files_total: scan.files_to_copy.max(files_done),
+        files_total: scan.totals.files_to_copy.max(files_done),
         current_file: String::new(),
         current_file_bytes_done: 0,
         current_file_bytes_total: 0,
+        items_deleted,
+        bytes_deleted,
     }));
 
     let _ = writeln!(log_file, "{}", "-".repeat(64));
@@ -608,8 +866,20 @@ async fn run_copy(
     );
     let _ = log_file.flush();
 
-    let summary = robocopy::parse_summary(&tail, exit_code);
-    Ok((exit_code, summary))
+    // A cancelled (killed) robocopy prints no summary: count what this run
+    // saw finish, so the result and the history do not claim nothing was
+    // copied. The file in hand when it was stopped is left out, so this is a
+    // lower bound; the folders are not known.
+    let summary = robocopy::parse_summary(&tail, exit_code).unwrap_or(RobocopySummary {
+        exit_code,
+        dirs_copied: 0,
+        files_copied: files_done,
+        files_failed: 0,
+        files_extra: 0,
+        bytes_copied: bytes_done,
+        bytes_failed: 0,
+    });
+    Ok((exit_code, summary, errors.summary()))
 }
 
 /// Restic counterpart of `run_copy`: same line-reading loop with cancellation
@@ -646,13 +916,25 @@ async fn run_restic_job(
         ),
     };
 
+    let phase = |phase: JobPhase, detail: String| {
+        emit(JobEvent::Phase {
+            job_id: job_id.to_string(),
+            phase,
+            detail: Some(detail),
+        })
+    };
+
+    phase(
+        JobPhase::Connecting,
+        format!("opening the restic repository at {repo}"),
+    );
     match restic::is_initialized(&repo, &password).await {
         Ok(true) => {}
         Ok(false) => {
-            emit(JobEvent::Phase {
-                job_id: job_id.to_string(),
-                phase: JobPhase::Connecting,
-            });
+            phase(
+                JobPhase::Connecting,
+                format!("no repository there yet: creating one at {repo}"),
+            );
             if let Err(e) = restic::init_repo(&repo, &password).await {
                 fail!(
                     Outcome::Failed,
@@ -664,10 +946,14 @@ async fn run_restic_job(
         Err(e) => fail!(Outcome::ConnectionError, e.to_string()),
     }
 
-    emit(JobEvent::Phase {
-        job_id: job_id.to_string(),
-        phase: JobPhase::Copying,
-    });
+    phase(
+        JobPhase::Copying,
+        format!(
+            "restic backup \"{}\" --json{}",
+            profile.source,
+            if dry_run { " --dry-run" } else { "" }
+        ),
+    );
 
     let mut child = match restic::start_backup(
         &profile.source,
@@ -740,6 +1026,8 @@ async fn run_restic_job(
                                 current_file: s.current_file,
                                 current_file_bytes_done: 0,
                                 current_file_bytes_total: 0,
+                                items_deleted: 0,
+                                bytes_deleted: 0,
                             }));
                         }
                     }
@@ -923,6 +1211,7 @@ mod tests {
             password: None,
             restic_password: None,
             dry_run: true,
+            preview: None,
         };
         let logs = base.join("logs");
         let result = run_job(&JobContext::new("j1".into()), request, &logs, |_| {}).await;
@@ -968,6 +1257,256 @@ mod tests {
     }
 
     #[test]
+    fn validate_paths_rejects_paths_that_are_not_full() {
+        let src = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        let src_s = src.display().to_string();
+
+        // `\nas\share` (one backslash short) would land in C:\nas\share.
+        for dst in [r"\nas\share\copy", "backup", r"D:backup", "D:", r"\\nas"] {
+            assert!(
+                matches!(validate_paths(&src_s, dst), Err(PathError::NotAbsolute(_))),
+                "{dst:?}"
+            );
+        }
+        assert!(matches!(
+            validate_paths(r"\Photos", r"D:\mirror"),
+            Err(PathError::NotAbsolute(_))
+        ));
+        for dst in [r"D:\", "D:/mirror", r"\\nas\share", "//nas/share/copy"] {
+            assert!(validate_paths(&src_s, dst).is_ok(), "{dst:?}");
+        }
+
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    /// A file robocopy cannot read fails the run (exit code 8), and the
+    /// result has to say which file and why, not just "failed".
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_failed_copy_says_why() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let src = base.join("source");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("ok.txt"), "ok").unwrap();
+        std::fs::write(src.join("locked.txt"), "locked").unwrap();
+        // No sharing at all: robocopy cannot open it.
+        let _lock = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src.join("locked.txt"))
+            .unwrap();
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Locked".into(),
+            source: src.display().to_string(),
+            destination: base.join("dest").display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: types::AdvancedOptions {
+                // One retry: the locked file is attempted, and listed, twice.
+                retries: 1,
+                wait_secs: 0,
+                ..Default::default()
+            },
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: false,
+            preview: None,
+        };
+        let (result, events) = run_with_events(request, &base.join("logs")).await;
+        assert_eq!(result.outcome, Outcome::Failed);
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("locked.txt"), "{error}");
+        match result.summary {
+            Some(EngineSummary::Robocopy(s)) => assert_eq!((s.files_copied, s.files_failed), (1, 1)),
+            other => panic!("expected a robocopy summary, got {other:?}"),
+        }
+        // The progress counts ok.txt only: not the failed file, nor its retry.
+        let last = events.iter().rev().find_map(|e| match e {
+            JobEvent::Progress(p) => Some(p.clone()),
+            _ => None,
+        });
+        let last = last.expect("a progress sample");
+        assert_eq!((last.files_done, last.bytes_done), (1, 2));
+
+        drop(_lock);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    fn group(name: &str, is_dir: bool, files: u64, bytes: u64) -> DeletionGroup {
+        DeletionGroup {
+            name: name.into(),
+            is_dir,
+            files,
+            bytes,
+        }
+    }
+
+    fn deleting(items: u64, bytes: u64) -> ScanTotals {
+        ScanTotals {
+            files_to_delete: items,
+            bytes_to_delete: bytes,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn numbers_read_as_in_the_window() {
+        assert_eq!(human_count(0), "0");
+        assert_eq!(human_count(4_813), "4,813");
+        assert_eq!(human_count(1_234_567), "1,234,567");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(9_605_000), "9.16 MB");
+        assert_eq!(human_bytes(20 << 30), "20.0 GB");
+    }
+
+    #[test]
+    fn deletion_guard_stops_what_cost_a_backup() {
+        // The case it comes from: C:\Photos mirrored into the share's root,
+        // which held the previous copy in Photos\ next to Photos old\ and
+        // Photos old old\.
+        let groups = [
+            group("Photos", true, 210_000, 20 << 30),
+            group("Photos old", true, 150_000, 15 << 30),
+        ];
+        let reason = deletion_guard(
+            r"C:\Photos",
+            r"\\nas\copy",
+            &deleting(400_000, 40 << 30),
+            &groups,
+        )
+        .expect("must ask");
+        assert!(reason.contains("folder named \"Photos\""), "{reason}");
+        assert!(reason.contains(r"\\nas\copy\Photos"), "{reason}");
+
+        // Any deletion at the root of a share or a drive.
+        let reason = deletion_guard(r"C:\data", r"\\nas\share", &deleting(3, 10), &[group("x.txt", false, 1, 10)])
+            .expect("must ask");
+        assert!(reason.contains("root of"), "{reason}");
+        assert!(deletion_guard(r"C:\data", r"E:\", &deleting(1, 1), &[]).is_some());
+
+        // Large deletions anywhere.
+        assert!(deletion_guard(r"C:\data", r"E:\copy", &deleting(1_000, 0), &[]).is_some());
+        assert!(deletion_guard(r"C:\data", r"E:\copy", &deleting(1, 2 << 30), &[]).is_some());
+
+        // Routine: a few files removed from the source since the last run.
+        assert_eq!(deletion_guard(r"C:\data", r"E:\copy", &deleting(12, 1 << 20), &[]), None);
+        assert_eq!(deletion_guard(r"C:\data", r"\\nas\share\copy", &deleting(0, 0), &[]), None);
+    }
+
+    /// An unattended run (no preview) refuses deletions that need a yes,
+    /// and touches nothing: here the destination is the folder that holds
+    /// the earlier copy's parent, as in the real case.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_unattended_run_refuses_to_delete_an_earlier_copy() {
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let src = base.join("Photos");
+        let dst = base.join("nas");
+        std::fs::create_dir_all(src.join("2026")).unwrap();
+        std::fs::write(src.join(r"2026\a.txt"), "a").unwrap();
+        for old in [r"Photos\2026", r"Photos old\2026"] {
+            std::fs::create_dir_all(dst.join(old)).unwrap();
+            std::fs::write(dst.join(old).join("a.txt"), "a").unwrap();
+        }
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Unattended".into(),
+            source: src.display().to_string(),
+            destination: dst.display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: Default::default(),
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: false,
+            preview: None,
+        };
+        let (result, events) = run_with_events(request, &base.join("logs")).await;
+
+        assert_eq!(result.outcome, Outcome::Failed);
+        let error = result.error.unwrap_or_default();
+        assert!(error.starts_with("nothing was copied or deleted"), "{error}");
+        assert!(dst.join(r"Photos\2026\a.txt").is_file());
+        assert!(dst.join(r"Photos old\2026\a.txt").is_file());
+        assert!(!dst.join("2026").exists(), "nothing may be copied either");
+        // The window gets the same reason and what would go, folder by folder.
+        let deletions = events.iter().find_map(|e| match e {
+            JobEvent::ScanResult { deletions, confirm_deletions: Some(_), .. } => Some(deletions.clone()),
+            _ => None,
+        });
+        let names: Vec<String> = deletions.expect("a scan result asking to confirm").into_iter().map(|g| g.name).collect();
+        assert!(names.contains(&"Photos".to_string()) && names.contains(&"Photos old".to_string()), "{names:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Deletions show in the copy's progress: a mirror run that only deletes
+    /// used to sit at 0 with nothing moving.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_copy_counts_what_it_deletes() {
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(dst.join("gone")).unwrap();
+        for n in 0..5 {
+            std::fs::write(dst.join(format!(r"gone\{n}.txt")), "12345").unwrap();
+        }
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Deletes".into(),
+            source: src.display().to_string(),
+            destination: dst.display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: Default::default(),
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        // As confirmed from the preview: the folder and its 5 files.
+        let preview = ScanTotals {
+            files_to_delete: 6,
+            bytes_to_delete: 25,
+            ..Default::default()
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: false,
+            preview: Some(preview),
+        };
+        let (result, events) = run_with_events(request, &base.join("logs")).await;
+        assert_eq!(result.outcome, Outcome::Success, "{:?}", result.error);
+        assert!(!dst.join("gone").exists());
+        let last = events.iter().rev().find_map(|e| match e {
+            JobEvent::Progress(p) => Some(p.clone()),
+            _ => None,
+        });
+        let last = last.expect("a progress sample");
+        assert_eq!((last.items_deleted, last.bytes_deleted), (6, 25));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn validate_paths_does_not_touch_network_sources() {
         // Not checked for existence (the share may be asleep or need the
         // job's login), but still checked for nesting.
@@ -1003,6 +1542,7 @@ mod tests {
             password: None,
             restic_password: None,
             dry_run: false,
+            preview: None,
         };
         let result = run_job(&JobContext::new("j1".into()), request, &log_dir, |_| {}).await;
         assert_eq!(result.outcome, Outcome::Failed);
@@ -1057,5 +1597,75 @@ mod tests {
         assert_eq!(classify_exit_code(4), Outcome::SuccessWithMismatches);
         assert_eq!(classify_exit_code(9), Outcome::Failed);
         assert_eq!(classify_exit_code(16), Outcome::Failed);
+    }
+
+    /// Runs `run_job` and keeps the events it sends.
+    async fn run_with_events(request: JobRequest, log_dir: &Path) -> (JobResult, Vec<JobEvent>) {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = events.clone();
+        let result = run_job(&JobContext::new("j1".into()), request, log_dir, move |e| {
+            sink.lock().unwrap().push(e)
+        })
+        .await;
+        let events = events.lock().unwrap().clone();
+        (result, events)
+    }
+
+    /// Confirming a preview copies without scanning again, and the progress
+    /// is measured against the preview's totals.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_confirmed_preview_copies_without_scanning_again() {
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let src = base.join("source");
+        std::fs::create_dir_all(src.join("empty")).unwrap();
+        std::fs::write(src.join("a.txt"), "1234").unwrap();
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Preview".into(),
+            source: src.display().to_string(),
+            destination: base.join("dest").display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: Default::default(),
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let preview = types::ScanTotals {
+            files_to_copy: 1,
+            bytes_to_copy: 4,
+            files_to_delete: 0,
+            dirs_to_create: 2,
+            bytes_to_delete: 0,
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: false,
+            preview: Some(preview),
+        };
+        let (result, events) = run_with_events(request, &base.join("logs")).await;
+
+        assert_eq!(result.outcome, Outcome::Success, "{:?}", result.error);
+        assert!(base.join("dest").join("empty").is_dir());
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            JobEvent::Phase { phase: JobPhase::Scanning, .. }
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            JobEvent::ScanResult { totals, warning: None, .. }
+                if totals.files_to_copy == 1 && totals.dirs_to_create == 2
+        )));
+        let last = events.iter().rev().find_map(|e| match e {
+            JobEvent::Progress(p) => Some(p.clone()),
+            _ => None,
+        });
+        let last = last.expect("a progress sample");
+        assert_eq!((last.files_done, last.bytes_done, last.bytes_total), (1, 4, 4));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

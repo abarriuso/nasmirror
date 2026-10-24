@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { CopyMode, Engine, Profile } from '../types'
 import { emptyRestic, newProfile } from '../types'
-import { formatList, isValidMac, parseList } from '../format'
+import { formatList, isFullPath, isRootPath, isValidMac, parseList } from '../format'
 import { open } from '@tauri-apps/plugin-dialog'
 
 interface Props {
@@ -63,12 +63,26 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
   // An empty user or MAC would only fail later, on every run.
   const credsMissing = needsCreds && !profile.credentials?.user.trim()
   const macInvalid = needsWol && !isValidMac(profile.wake_on_lan?.mac ?? '')
-  const canSave =
-    profile.name.trim() &&
-    profile.source.trim() &&
-    profile.destination.trim() &&
-    !credsMissing &&
-    !macInvalid
+  const isNetwork = (p: string) => /^(\\\\|\/\/)/.test(p.trim())
+  // The first thing that stops the job from saving, said where the Save
+  // button is; the backend checks the same and more before every run.
+  const problem = !profile.name.trim()
+    ? 'Give the job a name.'
+    : !profile.source.trim()
+      ? 'Choose the source folder.'
+      : !profile.destination.trim()
+        ? 'Choose the destination folder.'
+        : !isFullPath(profile.source)
+          ? 'The source needs a full path, like D:\\Photos or \\\\nas\\share\\Photos.'
+          : !isFullPath(profile.destination)
+            ? 'The destination needs a full path, like D:\\Backups or \\\\nas\\share (two backslashes).'
+            : credsMissing
+              ? 'Enter the network user name, or untick the user name and password option.'
+              : needsCreds && !isNetwork(profile.source) && !isNetwork(profile.destination)
+                ? 'The user name and password are only used for a network path (\\\\nas\\share): untick that option.'
+                : macInvalid
+                  ? 'Enter the MAC address of the destination (12 hex digits, e.g. AA:BB:CC:DD:EE:FF).'
+                  : null
 
   const pickFolder = async (which: 'source' | 'destination') => {
     const picked = await open({ directory: true, multiple: false })
@@ -81,12 +95,18 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
     setProfile((p) => ({ ...p, advanced: { ...p.advanced, [key]: value } }))
 
   const submit = () => {
+    if (problem) return
+    const wol = profile.wake_on_lan
     const toSave: Profile = {
       ...profile,
-      credentials: needsCreds ? { user: profile.credentials?.user ?? '', password: '' } : null,
-      wake_on_lan: needsWol
-        ? profile.wake_on_lan ?? { mac: '', host: '', timeout_secs: 120 }
-        : null,
+      name: profile.name.trim(),
+      source: profile.source.trim(),
+      destination: profile.destination.trim(),
+      credentials: needsCreds ? { user: profile.credentials?.user.trim() ?? '', password: '' } : null,
+      wake_on_lan:
+        needsWol && wol
+          ? { mac: wol.mac.trim(), host: wol.host.trim(), timeout_secs: wol.timeout_secs }
+          : null,
     }
     onSave(toSave)
   }
@@ -222,6 +242,17 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               </div>
             </label>
           ))}
+          {profile.mode === 'mirror' && isRootPath(profile.destination) && (
+            <p className="preview-panel__danger">
+              ⚠ The destination is the root of {profile.destination.trim()}: mirror mode deletes
+              everything else stored there. Give the copy a folder of its own, like{' '}
+              <code>
+                {profile.destination.trim().replace(/[\\/]+$/, '')}\
+                {profile.source.trim().replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'Backup'}
+              </code>
+              .
+            </p>
+          )}
         </fieldset>
       )}
 
@@ -378,10 +409,11 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
       </div>
 
       <div className="form-actions">
+        {problem && <span className="field-hint">{problem}</span>}
         <button type="button" onClick={onCancel}>
           Cancel
         </button>
-        <button type="button" className="primary" disabled={!canSave} onClick={submit}>
+        <button type="button" className="primary" disabled={!!problem} onClick={submit}>
           Save job
         </button>
       </div>

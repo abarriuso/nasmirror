@@ -51,9 +51,31 @@ export interface JobRequest {
   password?: string | null
   restic_password?: string | null
   dry_run: boolean
+  /** What the preview found: the confirmed copy starts without scanning again. */
+  preview?: ScanTotals | null
+}
+
+/** What a robocopy scan found to do. */
+export interface ScanTotals {
+  files_to_copy: number
+  bytes_to_copy: number
+  files_to_delete: number
+  /** Folders missing from the destination, empty ones included. */
+  dirs_to_create: number
+  /** Size of the files `files_to_delete` counts (mirror mode). */
+  bytes_to_delete: number
+}
+
+/** What mirror mode would delete under one item at the top of the destination. */
+export interface DeletionGroup {
+  name: string
+  is_dir: boolean
+  files: number
+  bytes: number
 }
 
 export type JobPhase =
+  | 'checking'
   | 'connecting'
   | 'waking_target'
   | 'scanning'
@@ -105,6 +127,8 @@ export interface JobResult {
 export interface HistoryEntry {
   id: string
   finished_at: string
+  /** The job that ran; empty for entries written before it was recorded. */
+  profile_id: string
   profile_name: string
   source: string
   destination: string
@@ -129,17 +153,36 @@ export interface ProgressSample {
   current_file: string
   current_file_bytes_done: number
   current_file_bytes_total: number
+  /** Files and folders deleted from the destination so far (mirror mode). */
+  items_deleted: number
+  bytes_deleted: number
 }
 
 export type JobEvent =
-  | { type: 'phase'; job_id: string; phase: JobPhase }
   | {
+      type: 'phase'
+      job_id: string
+      phase: JobPhase
+      /** What exactly the step does: the paths, the share and user, the command run. */
+      detail: string | null
+    }
+  | ({
+      type: 'scan_progress'
+      job_id: string
+      dirs_scanned: number
+      /** Empty once the scan has finished. */
+      current_dir: string
+    } & ScanTotals)
+  | ({
       type: 'scan_result'
       job_id: string
-      files_to_copy: number
-      bytes_to_copy: number
-      files_to_delete: number
-    }
+      /** A problem robocopy reported while scanning; what it could read can still be copied. */
+      warning: string | null
+      /** What mirror mode would delete, by item at the top of the destination, largest first. */
+      deletions: DeletionGroup[]
+      /** Why these deletions need an explicit yes before copying; `null` when routine. */
+      confirm_deletions: string | null
+    } & ScanTotals)
   | ({ type: 'progress' } & ProgressSample)
   | { type: 'log_line'; job_id: string; line: string }
   | { type: 'retry_warning'; job_id: string; file: string; attempt: number }

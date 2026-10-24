@@ -4,7 +4,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- The preview and the copy show each step as it happens: checking the
+  paths, waking the NAS, connecting to the share (and as which user),
+  comparing, copying. Each has its time and the exact paths or command
+  line. While comparing, a running count of the folders checked, the folder
+  it is in and what it has found so far: a long scan over the network no
+  longer looks stuck.
+- Each job card shows its last run: when, how it ended, files, data and
+  duration.
+- The results screen names the job and its paths, gives robocopy's exit
+  code, lists the steps with their commands, and shows the run's log in
+  place.
+- The copy log starts with the exact robocopy command.
+
 ### Fixed
+- **Mirror mode deleted an earlier copy without a clear warning.** A job
+  pointed at the root of a share (`\\nas\copy`), while its earlier copy lived
+  in `\\nas\copy\Photos`, deleted that copy and everything else on the share,
+  and the preview only gave a count. Now:
+  - the preview lists what would be deleted, folder by folder, with sizes;
+  - when the destination has a folder named like the source, it says so and
+    offers to use that folder as the destination, in one click;
+  - deleting from a drive or share root, 1,000 or more items, or 1 GB or
+    more needs a box ticked before the copy (the button reads "Delete N and
+    copy");
+  - an unattended run (`--job`) refuses such deletions, says why and copies
+    nothing;
+  - the job form warns when mirror mode points at a drive or share root.
+- A copy that was only deleting sat at 0% for minutes with a flat chart:
+  deletions are now counted on the bar, in a "Deleted" tile and as the latest
+  item, and the chart shows files copied or deleted per second next to the
+  data rate.
+- Closing the window during a copy stopped it without a word; it now asks,
+  and a confirmed close cancels the job properly first.
+- Closing NASMirror, ending its task or a crash during a scan or a copy left
+  robocopy (or restic) running on its own, unseen: still copying, or
+  deleting in mirror mode, and competing with the next run for the NAS. They
+  now end with NASMirror.
+- Cancel pressed while a scan was still starting did nothing.
+- The network password prompt has a Cancel button, besides Escape.
+- The job form rejects paths that are not full paths, and a network user
+  name on a job with no network path, before saving instead of at the next
+  run.
 - Network paths written as `//nas/share` or with spaces around them now get
   the job's credentials and Wake-on-LAN, like `\\nas\share`; paths are
   trimmed before validating.
@@ -39,6 +81,41 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   a custom Wake-on-LAN timeout when the MAC or host is edited.
 - The copy mode (mirror / add only) is hidden for restic jobs, which ignore
   it, instead of showing a misleading "Mirror" badge.
+- **Delete** (job or history entry) and **Stop** never asked for
+  confirmation: the dialog plugin replaces `window.confirm` with a function
+  that always reads as "yes". They now ask in a native dialog, and anything
+  but an explicit OK keeps the job, entry or copy. Lint (`no-alert`) keeps
+  `alert` and `confirm` from coming back.
+- One unreadable folder anywhere in the source (robocopy exit code 8 while
+  scanning) aborted the whole job before copying anything. The rest is now
+  copied; the preview warns, and the result names what could not be read.
+  The preview also warns when robocopy reports a destination it cannot
+  reach, instead of promising to copy every file there.
+- A failed copy only said "Backup failed": the result and the history now
+  carry robocopy's own explanation (e.g. the file in use and by what), in
+  any Windows language, naming first the file robocopy gave up on rather
+  than one it recovered from on retry. A failed scan says why instead of
+  "exited with code 16".
+- The progress counted a file that failed as copied, and a retried one once
+  per attempt; files now count once robocopy has moved on from them.
+- A new empty folder, when it was the only change, ended as "no changes"
+  and was never created. The preview counts new folders too.
+- A path that is not a full path (`\nas\share`, one backslash short, or a
+  relative `backup`) was accepted and resolved against the current drive or
+  the app's folder. It is now rejected before anything runs.
+- Confirming the preview scanned the whole tree a second time; the copy now
+  reuses what the preview found and starts at once.
+- A cancelled copy was recorded as 0 files and 0 B; it now shows the files
+  copied before stopping, without the folder count and exit code it cannot
+  know.
+- In mirror mode the result listed the deleted extras as "Files only in the
+  destination"; it now says they were deleted.
+- The time left showed nonsense (hundreds of hours) while robocopy worked
+  through small files, since it went by bytes alone; it now follows files
+  and bytes together, and waits for 10 s of data.
+- The job form kept spaces around the paths and did not say why it could
+  not be saved; it now names what is missing next to Save, and the job list
+  shows the destination on its own line.
 
 ## [0.9.0] - 2026-09-24
 
