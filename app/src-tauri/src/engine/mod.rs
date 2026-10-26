@@ -227,6 +227,20 @@ fn human_count(n: u64) -> String {
     out
 }
 
+/// "1 file", "12,345 files", as the window's `plural` writes them.
+fn plural(n: u64, one: &str, many: &str) -> String {
+    format!("{} {}", human_count(n), if n == 1 { one } else { many })
+}
+
+/// The last folder of `path` (`D:\Photos\` → `Photos`); `None` for a drive
+/// or share root, which has no name of its own.
+fn folder_name(path: &str) -> Option<String> {
+    let path = path.trim().replace('/', "\\");
+    Path::new(path.trim_end_matches('\\'))
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+}
+
 /// Deletions above these need an explicit yes (see `deletion_guard`).
 pub const CONFIRM_DELETIONS_FROM_ITEMS: u64 = 1_000;
 pub const CONFIRM_DELETIONS_FROM_BYTES: u64 = 1 << 30;
@@ -247,19 +261,17 @@ pub fn deletion_guard(
     if totals.files_to_delete == 0 {
         return None;
     }
-    let source_name = Path::new(source.trim().trim_end_matches(['\\', '/']))
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase());
+    let source_name = folder_name(source).map(|n| n.to_lowercase());
     if let Some(same) = deletions
         .iter()
         .find(|g| g.is_dir && Some(g.name.to_lowercase()) == source_name)
     {
         return Some(format!(
             "the destination already has a folder named \"{}\", like the source, and mirror mode \
-             would delete it ({} files, {}). If it holds an earlier copy, the destination should \
+             would delete it ({}, {}). If it holds an earlier copy, the destination should \
              be that folder: {}\\{}",
             same.name,
-            human_count(same.files),
+            plural(same.files, "file", "files"),
             human_bytes(same.bytes),
             destination.trim().trim_end_matches(['\\', '/']),
             same.name
@@ -268,9 +280,9 @@ pub fn deletion_guard(
     if is_root(destination) {
         return Some(format!(
             "the destination is the root of {}: mirror mode would delete everything else stored \
-             there ({} files or folders, {})",
+             there ({}, {})",
             destination.trim(),
-            human_count(totals.files_to_delete),
+            plural(totals.files_to_delete, "file or folder", "files or folders"),
             human_bytes(totals.bytes_to_delete)
         ));
     }
@@ -278,12 +290,36 @@ pub fn deletion_guard(
         || totals.bytes_to_delete >= CONFIRM_DELETIONS_FROM_BYTES
     {
         return Some(format!(
-            "mirror mode would delete {} files or folders ({}) from the destination",
-            human_count(totals.files_to_delete),
+            "mirror mode would delete {} ({}) from the destination",
+            plural(totals.files_to_delete, "file or folder", "files or folders"),
             human_bytes(totals.bytes_to_delete)
         ));
     }
     None
+}
+
+/// A job is running in another NASMirror process.
+struct AnotherRun;
+
+/// One job at a time across processes, not only within the window: a
+/// scheduled `--job` starting while the window copies to the same
+/// destination ran a second robocopy next to the first, competing for the
+/// NAS and, in mirror mode, deleting what the other was copying. Held as a
+/// file in `log_dir` opened with no sharing, which Windows releases when the
+/// process ends, however it ends. Best effort: if the file cannot be created
+/// at all, the job runs without it rather than not at all.
+fn lock_runs(log_dir: &Path) -> Result<Option<std::fs::File>, AnotherRun> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0);
+    /// `ERROR_SHARING_VIOLATION`: another process has it open.
+    const SHARING_VIOLATION: i32 = 32;
+    match options.open(log_dir.join("running.lock")) {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Err(AnotherRun),
+        Err(_) => Ok(None),
+    }
 }
 
 pub struct JobContext {
@@ -320,11 +356,13 @@ pub async fn run_job(
 
     macro_rules! finish {
         ($outcome:expr, $summary:expr, $error:expr, $log_path:expr) => {{
+            let log_path: String = $log_path;
             let result = JobResult {
                 outcome: $outcome,
                 summary: $summary,
                 error: $error,
-                log_path: $log_path,
+                has_log: Path::new(&log_path).is_file(),
+                log_path,
                 elapsed_secs: started.elapsed().as_secs_f64(),
             };
             // Dry runs copy nothing, so they are not recorded in history.
@@ -344,6 +382,23 @@ pub async fn run_job(
     // reason shows up.
     let log_path = robocopy::default_log_path(log_dir);
     let _ = std::fs::create_dir_all(log_dir);
+
+    // Held until the job ends, however it ends.
+    let _running = match lock_runs(log_dir) {
+        Ok(lock) => lock,
+        Err(AnotherRun) => {
+            finish!(
+                Outcome::Failed,
+                None,
+                Some(
+                    "another NASMirror (the window or a scheduled task) is already running a \
+                     job, so nothing was copied or deleted. Run this one when it has finished."
+                        .into()
+                ),
+                log_path.display().to_string()
+            );
+        }
+    };
 
     let phase = |phase: JobPhase, detail: String| {
         emit(JobEvent::Phase {
@@ -503,6 +558,7 @@ pub async fn run_job(
             totals,
             warning: None,
             deletions: Vec::new(),
+            deletion_groups: 0,
         }
     } else {
         phase(
@@ -573,6 +629,7 @@ pub async fn run_job(
         totals: scan.totals,
         warning: scan.warning.clone(),
         deletions: scan.deletions.clone(),
+        deletion_groups: scan.deletion_groups,
         confirm_deletions: confirm_deletions.clone(),
     });
 
@@ -761,6 +818,7 @@ async fn run_copy(
     let mut items_deleted = 0u64;
     let mut bytes_deleted = 0u64;
     let mut current_file = String::new();
+    let mut current_deleted = false;
     let start = Instant::now();
     let mut last_sample = 0u128;
 
@@ -785,6 +843,7 @@ async fn run_copy(
                             files_done += 1;
                         }
                         current_file = path;
+                        current_deleted = false;
                     }
                     // Deleted (mirror) or left alone (add-only): not part of
                     // the bytes being copied. Folders are not listed (/NDL).
@@ -793,6 +852,7 @@ async fn run_copy(
                             items_deleted += 1;
                             bytes_deleted += bytes.unwrap_or(0);
                             current_file = path;
+                            current_deleted = true;
                         }
                     }
                     robocopy::RcLine::Dir { .. } => {}
@@ -828,8 +888,7 @@ async fn run_copy(
                 files_done,
                 files_total: scan.totals.files_to_copy.max(files_done),
                 current_file: current_file.clone(),
-                current_file_bytes_done: 0,
-                current_file_bytes_total: 0,
+                current_deleted,
                 items_deleted,
                 bytes_deleted,
             }));
@@ -851,8 +910,7 @@ async fn run_copy(
         files_done,
         files_total: scan.totals.files_to_copy.max(files_done),
         current_file: String::new(),
-        current_file_bytes_done: 0,
-        current_file_bytes_total: 0,
+        current_deleted: false,
         items_deleted,
         bytes_deleted,
     }));
@@ -901,6 +959,7 @@ async fn run_restic_job(
                 outcome: $outcome,
                 summary: None,
                 error: Some($error),
+                has_log: log_path.is_file(),
                 log_path: log_path_str.clone(),
                 elapsed_secs: start.elapsed().as_secs_f64(),
             }
@@ -1024,8 +1083,7 @@ async fn run_restic_job(
                                 files_done: s.files_done,
                                 files_total: s.files_total,
                                 current_file: s.current_file,
-                                current_file_bytes_done: 0,
-                                current_file_bytes_total: 0,
+                                current_deleted: false,
                                 items_deleted: 0,
                                 bytes_deleted: 0,
                             }));
@@ -1070,6 +1128,7 @@ async fn run_restic_job(
             outcome: Outcome::Cancelled,
             summary: summary_out,
             error: None,
+            has_log: log_path.is_file(),
             log_path: log_path_str,
             elapsed_secs: start.elapsed().as_secs_f64(),
         };
@@ -1084,6 +1143,7 @@ async fn run_restic_job(
                 Some(last) => format!("restic exited with code {:?}: {last}", status.code()),
                 None => format!("restic exited with code {:?}", status.code()),
             }),
+            has_log: log_path.is_file(),
             log_path: log_path_str,
             elapsed_secs: start.elapsed().as_secs_f64(),
         };
@@ -1133,6 +1193,7 @@ async fn run_restic_job(
         outcome,
         summary: summary_out,
         error: warning,
+        has_log: log_path.is_file(),
         log_path: log_path_str,
         elapsed_secs: start.elapsed().as_secs_f64(),
     }
@@ -1324,6 +1385,7 @@ mod tests {
         };
         let (result, events) = run_with_events(request, &base.join("logs")).await;
         assert_eq!(result.outcome, Outcome::Failed);
+        assert!(result.has_log, "the log is where robocopy explains the failure");
         let error = result.error.unwrap_or_default();
         assert!(error.contains("locked.txt"), "{error}");
         match result.summary {
@@ -1364,6 +1426,8 @@ mod tests {
         assert_eq!(human_count(0), "0");
         assert_eq!(human_count(4_813), "4,813");
         assert_eq!(human_count(1_234_567), "1,234,567");
+        assert_eq!(plural(1, "file", "files"), "1 file");
+        assert_eq!(plural(4_813, "file", "files"), "4,813 files");
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(9_605_000), "9.16 MB");
         assert_eq!(human_bytes(20 << 30), "20.0 GB");
@@ -1453,6 +1517,101 @@ mod tests {
         let names: Vec<String> = deletions.expect("a scan result asking to confirm").into_iter().map(|g| g.name).collect();
         assert!(names.contains(&"Photos".to_string()) && names.contains(&"Photos old".to_string()), "{names:?}");
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The earlier copy is found however small it is next to the rest of
+    /// what would be deleted: the window is sent only the largest dozen
+    /// items, and the check used to look only among those.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn an_earlier_copy_is_found_among_larger_deletions() {
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let src = base.join("Photos");
+        let dst = base.join("backups");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        std::fs::create_dir_all(dst.join("Photos")).unwrap();
+        std::fs::write(dst.join("Photos").join("a.txt"), "a").unwrap();
+        for n in 0..15 {
+            std::fs::write(dst.join(format!("big{n}.bin")), "x".repeat(100)).unwrap();
+        }
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Small earlier copy".into(),
+            source: src.display().to_string(),
+            destination: dst.display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: Default::default(),
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: true,
+            preview: None,
+        };
+        let (_, events) = run_with_events(request, &base.join("logs")).await;
+        let (deletions, groups, confirm) = events
+            .iter()
+            .find_map(|e| match e {
+                JobEvent::ScanResult {
+                    deletions,
+                    deletion_groups,
+                    confirm_deletions,
+                    ..
+                } => Some((deletions.clone(), *deletion_groups, confirm_deletions.clone())),
+                _ => None,
+            })
+            .expect("a scan result");
+        // Not a root, and far below the size limits: only the name gives it away.
+        let confirm = confirm.expect("the earlier copy needs a yes");
+        assert!(confirm.contains("folder named \"Photos\""), "{confirm}");
+        assert!(deletions.iter().any(|g| g.name == "Photos"), "{deletions:?}");
+        assert_eq!((deletions.len(), groups), (13, 16));
+        assert!(dst.join("Photos").join("a.txt").is_file());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A scheduled `--job` and the window cannot run at the same time.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_job_does_not_start_while_another_process_runs_one() {
+        let base = std::env::temp_dir().join(format!("nasmirror-test-{}", uuid::Uuid::new_v4()));
+        let logs = base.join("logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        let other = lock_runs(&logs).ok().flatten().expect("the lock");
+        let profile = Profile {
+            id: "p1".into(),
+            name: "Second".into(),
+            source: base.join("src").display().to_string(),
+            destination: base.join("dst").display().to_string(),
+            mode: types::CopyMode::Mirror,
+            credentials: None,
+            wake_on_lan: None,
+            advanced: Default::default(),
+            engine: Engine::Robocopy,
+            restic: Default::default(),
+        };
+        let request = JobRequest {
+            profile,
+            password: None,
+            restic_password: None,
+            dry_run: false,
+            preview: None,
+        };
+        let (result, _) = run_with_events(request, &logs).await;
+        assert_eq!(result.outcome, Outcome::Failed);
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("already running a job"), "{error}");
+
+        drop(other);
+        assert!(matches!(lock_runs(&logs), Ok(Some(_))), "released with its process");
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -1546,6 +1705,7 @@ mod tests {
         };
         let result = run_job(&JobContext::new("j1".into()), request, &log_dir, |_| {}).await;
         assert_eq!(result.outcome, Outcome::Failed);
+        assert!(!result.has_log);
 
         let entries = crate::history::list(&log_dir);
         assert_eq!(entries.len(), 1);

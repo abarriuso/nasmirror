@@ -19,6 +19,38 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The copy log starts with the exact robocopy command.
 
 ### Fixed
+- **Connecting to the NAS, and disconnecting after each job, closed files
+  other programs had open on it**: a document opened from the share in Word
+  or Excel lost its file, and with it any unsaved work. NASMirror now only
+  drops a connection nothing is using; on a conflict with another user's
+  session it says to close what is open there.
+- **The check for an earlier copy only looked among the 12 largest things
+  to delete.** A folder named like the source, smaller than a dozen other
+  items in the destination, went unnoticed: no confirmation, and `--job`
+  deleted it. It is now found wherever it ranks, and the preview's list says
+  how many more items it does not name, and their size.
+- The window and a scheduled `--job` could run at the same time, two
+  robocopy runs on the same NAS. A job now refuses to start while another
+  NASMirror is running one, and copies or deletes nothing.
+- While copying, every file read as "Deleted" (and the job as "Deleting what
+  is not in the source…", even in add-only mode) when the source was typed
+  with forward slashes (`D:/Photos`); deletions from a destination named like
+  the source (`D:\Photos backup`) read as copies. The copy now says which
+  each one is.
+- Robocopy's exit code 4 was explained as harmless attribute differences
+  with "the data itself was copied correctly". It means a name that is a
+  file on one side and a folder on the other, and that file is not in the
+  copy; the result now says so.
+- A job that hit an internal error left the window on its progress screen,
+  and every later Start was refused as "a job is already running" until
+  NASMirror was restarted.
+- A mistyped argument (`--dryrun`) exited with code 2, which means
+  "Cancelled"; it now exits with 6.
+- The result of a failed restic backup had no "View log" button, though its
+  log is where restic says why.
+- The steps said "Waking the destination" and "Connecting to the
+  destination" when the NAS was the source.
+- The history list wrote "1 files" and counts without thousands separators.
 - **Mirror mode deleted an earlier copy without a clear warning.** A job
   pointed at the root of a share (`\\nas\copy`), while its earlier copy lived
   in `\\nas\copy\Photos`, deleted that copy and everything else on the share,

@@ -57,6 +57,11 @@ describe('relativePath', () => {
     expect(relativePath('C:\\Photos\\', 'c:\\photos\\x')).toBe('…\\x')
   })
 
+  it('reads a source typed with forward slashes as robocopy prints it', () => {
+    expect(relativePath('D:/Photos/', 'D:\\Photos\\2026\\a.jpg')).toBe('…\\2026\\a.jpg')
+    expect(relativePath(' //nas/share/Photos', '\\\\nas\\share\\Photos\\a.jpg')).toBe('…\\a.jpg')
+  })
+
   it('leaves other paths whole', () => {
     expect(relativePath('C:\\Photos', 'C:\\Photos2\\x')).toBe('C:\\Photos2\\x')
     expect(relativePath('C:\\Photos', 'C:\\Photos\\')).toBe('C:\\Photos\\')

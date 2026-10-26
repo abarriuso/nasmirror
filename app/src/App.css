@@ -898,6 +898,10 @@ input[type='radio'] {
   font-variant-numeric: tabular-nums;
   color: var(--muted);
 }
+.deletions__more span:first-child {
+  white-space: normal;
+  font-style: italic;
+}
 .deletions__confirm {
   display: flex;
   gap: var(--sp-2);

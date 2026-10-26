@@ -18,19 +18,17 @@ type Series = 'bytesPerSec' | 'itemsPerSec'
 
 interface Props {
   samples: SpeedSample[]
-  /** Optional reference (e.g. link or disk limit) that fixes the scale. */
-  referenceBytesPerSec?: number
-  heightPx?: number
 }
 
 const WINDOW_MS = 60_000
+const HEIGHT_PX = 160
 
 /**
  * Live speed chart. Interpolates linearly between real samples inside a
  * requestAnimationFrame loop, so it moves at the monitor's refresh rate
  * instead of jumping every 200 ms.
  */
-export const SpeedChart = memo(function SpeedChart({ samples, referenceBytesPerSec, heightPx = 160 }: Props) {
+export const SpeedChart = memo(function SpeedChart({ samples }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   // The rAF loop always reads the latest samples without restarting on every render.
   const samplesRef = useRef(samples)
@@ -87,7 +85,7 @@ export const SpeedChart = memo(function SpeedChart({ samples, referenceBytesPerS
       }
       const visible = s.slice(startIdx)
       // Compute the max with a loop: spreading a large array into Math.max can overflow the stack
-      let maxSpeed = referenceBytesPerSec ?? 0
+      let maxSpeed = 0
       for (let i = 0; i < visible.length; i++) {
         if (visible[i].bytesPerSec > maxSpeed) maxSpeed = visible[i].bytesPerSec
       }
@@ -102,17 +100,6 @@ export const SpeedChart = memo(function SpeedChart({ samples, referenceBytesPerS
         ctx.moveTo(0, y)
         ctx.lineTo(w, y)
         ctx.stroke()
-      }
-
-      if (referenceBytesPerSec && referenceBytesPerSec > 0) {
-        const y = h - (referenceBytesPerSec / maxSpeed) * h
-        ctx.strokeStyle = 'rgba(250, 204, 21, 0.5)'
-        ctx.setLineDash([6, 6])
-        ctx.beginPath()
-        ctx.moveTo(0, y)
-        ctx.lineTo(w, y)
-        ctx.stroke()
-        ctx.setLineDash([])
       }
 
       if (visible.length >= 1) {
@@ -184,13 +171,13 @@ export const SpeedChart = memo(function SpeedChart({ samples, referenceBytesPerS
       cancelAnimationFrame(raf)
       ro.disconnect()
     }
-  }, [referenceBytesPerSec])
+  }, [])
 
   return (
     <div className="speed-chart">
       <canvas
         ref={canvasRef}
-        style={{ width: '100%', height: heightPx, display: 'block' }}
+        style={{ width: '100%', height: HEIGHT_PX, display: 'block' }}
         role="img"
         aria-label="Transfer speed and files per second, last minute"
       />

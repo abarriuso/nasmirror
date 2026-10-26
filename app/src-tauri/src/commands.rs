@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
-use crate::engine::types::{JobEvent, JobRequest, Profile};
+use crate::engine::types::{JobEvent, JobRequest, JobResult, Outcome, Profile};
 use crate::engine::JobContext;
 use crate::profiles;
 
@@ -84,11 +84,33 @@ pub async fn start_job(
     let job_id_for_cleanup = job_id.clone();
 
     tokio::spawn(async move {
-        crate::engine::run_job(&ctx, request, &log_dir, move |event: JobEvent| {
-            let _ = app_for_emit.emit(EVENT_CHANNEL, &event);
-        })
-        .await;
-        // Drop the cancel flag of the finished job.
+        let job = tokio::spawn(async move {
+            crate::engine::run_job(&ctx, request, &log_dir, move |event: JobEvent| {
+                let _ = app_for_emit.emit(EVENT_CHANNEL, &event);
+            })
+            .await
+        });
+        // A job that panicked never said it ended: the window waited on its
+        // progress screen for good. Say it failed, and why.
+        if let Err(e) = job.await {
+            let result = JobResult {
+                outcome: Outcome::Failed,
+                summary: None,
+                error: Some(format!("NASMirror hit an internal error and stopped the job: {e}")),
+                log_path: String::new(),
+                has_log: false,
+                elapsed_secs: 0.0,
+            };
+            let _ = app.emit(
+                EVENT_CHANNEL,
+                &JobEvent::Finished {
+                    job_id: job_id_for_cleanup.clone(),
+                    result,
+                },
+            );
+        }
+        // Drop the cancel flag of the finished job, however it finished: left
+        // behind, every later Start read as "a job is already running".
         app.state::<JobRegistry>()
             .jobs
             .lock()

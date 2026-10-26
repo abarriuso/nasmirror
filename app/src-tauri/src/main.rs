@@ -10,7 +10,8 @@ use clap::Parser;
 ///
 /// Exit codes: 0 success (or nothing to copy), 1 failure, connection error or
 /// unreadable saved jobs, 2 cancelled, 3 job not found, 4 completed with
-/// mismatches, 5 the job needs a password and cannot run without the window.
+/// mismatches, 5 the job needs a password and cannot run without the window,
+/// 6 the arguments were not understood.
 #[derive(Parser, Debug)]
 #[command(name = "nasmirror", version)]
 struct Cli {
@@ -22,8 +23,20 @@ struct Cli {
     dry_run: bool,
 }
 
+/// Arguments that are not understood (`--dryrun`, `--job` with no name).
+/// Clap's own code for them is 2, which here means "cancelled": a scheduled
+/// task with a typo would read as cancelled every night, having never run.
+const EXIT_BAD_ARGUMENTS: i32 = 6;
+
 fn main() {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => {
+            let _ = e.print();
+            // `--help` and `--version` come this way too, and are not errors.
+            std::process::exit(if e.use_stderr() { EXIT_BAD_ARGUMENTS } else { 0 });
+        }
+    };
     if let Some(name) = cli.job {
         std::process::exit(run_headless(&name, cli.dry_run));
     }
@@ -105,4 +118,18 @@ fn run_headless(name: &str, dry_run: bool) -> i32 {
             Outcome::Failed | Outcome::ConnectionError => 1,
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bad_arguments_are_not_read_as_cancelled() {
+        for args in [&["nasmirror", "--dryrun"][..], &["nasmirror", "--job"][..]] {
+            assert!(Cli::try_parse_from(args).unwrap_err().use_stderr(), "{args:?}");
+        }
+        // Not errors: they exit with 0.
+        assert!(!Cli::try_parse_from(["nasmirror", "--help"]).unwrap_err().use_stderr());
+    }
 }

@@ -80,8 +80,6 @@ export type JobPhase =
   | 'waking_target'
   | 'scanning'
   | 'copying'
-  | 'cancelling'
-  | 'done'
 
 export type Outcome =
   | 'no_changes'
@@ -120,6 +118,8 @@ export interface JobResult {
   summary: EngineSummary | null
   error: string | null
   log_path: string
+  /** Whether the run wrote a log to show (a failed restic backup has no summary, but a log). */
+  has_log: boolean
   elapsed_secs: number
 }
 
@@ -151,8 +151,8 @@ export interface ProgressSample {
   files_done: number
   files_total: number
   current_file: string
-  current_file_bytes_done: number
-  current_file_bytes_total: number
+  /** `current_file` was deleted from the destination (mirror mode), not copied from the source. */
+  current_deleted: boolean
   /** Files and folders deleted from the destination so far (mirror mode). */
   items_deleted: number
   bytes_deleted: number
@@ -180,12 +180,12 @@ export type JobEvent =
       warning: string | null
       /** What mirror mode would delete, by item at the top of the destination, largest first. */
       deletions: DeletionGroup[]
+      /** How many items at the top of the destination would be deleted in all; `deletions` names the largest. */
+      deletion_groups: number
       /** Why these deletions need an explicit yes before copying; `null` when routine. */
       confirm_deletions: string | null
     } & ScanTotals)
   | ({ type: 'progress' } & ProgressSample)
-  | { type: 'log_line'; job_id: string; line: string }
-  | { type: 'retry_warning'; job_id: string; file: string; attempt: number }
   | { type: 'finished'; job_id: string; result: JobResult }
 
 export function emptyAdvanced(): AdvancedOptions {

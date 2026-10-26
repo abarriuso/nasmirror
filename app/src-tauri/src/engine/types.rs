@@ -190,8 +190,6 @@ pub enum JobPhase {
     WakingTarget,
     Scanning,
     Copying,
-    Cancelling,
-    Done,
 }
 
 /// Why the job ended. For robocopy it is derived from the real exit code
@@ -244,6 +242,11 @@ pub struct JobResult {
     pub summary: Option<EngineSummary>,
     pub error: Option<String>,
     pub log_path: String,
+    /// Whether the run wrote a log to show. Not only a run with a summary:
+    /// a restic backup that fails has none, and its log is where restic
+    /// says why.
+    #[serde(default)]
+    pub has_log: bool,
     pub elapsed_secs: f64,
 }
 
@@ -258,8 +261,11 @@ pub struct ProgressSample {
     pub files_done: u64,
     pub files_total: u64,
     pub current_file: String,
-    pub current_file_bytes_done: u64,
-    pub current_file_bytes_total: u64,
+    /// `current_file` was deleted from the destination (mirror mode), not
+    /// copied from the source. Robocopy's line says which; the path alone
+    /// does not (`D:/Photos` as typed, `D:\Photos backup` next to it).
+    #[serde(default)]
+    pub current_deleted: bool,
     /// Files and folders deleted from the destination so far (mirror mode).
     /// A copy can spend minutes deleting and moving no bytes at all.
     #[serde(default)]
@@ -300,21 +306,16 @@ pub enum JobEvent {
         /// destination, largest first.
         #[serde(default)]
         deletions: Vec<DeletionGroup>,
+        /// How many items at the top of the destination mirror mode would
+        /// delete in all: `deletions` names only the largest.
+        #[serde(default)]
+        deletion_groups: u64,
         /// Why these deletions need an explicit yes before copying (see
         /// `deletion_guard`); `None` when they are routine.
         #[serde(default)]
         confirm_deletions: Option<String>,
     },
     Progress(ProgressSample),
-    LogLine {
-        job_id: String,
-        line: String,
-    },
-    RetryWarning {
-        job_id: String,
-        file: String,
-        attempt: u32,
-    },
     Finished {
         job_id: String,
         result: JobResult,

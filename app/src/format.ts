@@ -110,7 +110,8 @@ export function formatElapsed(ms: number): string {
  * inside `base`: the shared start of every path in a scan only takes room.
  */
 export function relativePath(base: string, path: string): string {
-  const b = base.replace(/[\\/]+$/, '')
+  // As typed (`D:/Photos`), while robocopy prints backslashes.
+  const b = base.trim().replace(/\//g, '\\').replace(/\\+$/, '')
   if (b && path.toLowerCase().startsWith(`${b.toLowerCase()}\\`)) {
     const rest = path.slice(b.length + 1).replace(/\\$/, '')
     return rest ? `…\\${rest}` : path

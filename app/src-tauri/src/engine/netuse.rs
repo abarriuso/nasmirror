@@ -63,10 +63,12 @@ fn server_connections(share: &str) -> Vec<ExistingConnection> {
             return found;
         }
 
-        let mut buffer = vec![0u8; 64 * 1024];
+        // Read back as `NETRESOURCEW`s, which hold pointers: a byte buffer
+        // has no alignment to offer them, a `u64` one has.
+        let mut buffer = vec![0u64; 8 * 1024];
         loop {
             let mut count: u32 = u32::MAX;
-            let mut size = buffer.len() as u32;
+            let mut size = std::mem::size_of_val(buffer.as_slice()) as u32;
             let rc = WNetEnumResourceW(
                 henum,
                 &mut count,
@@ -121,7 +123,10 @@ fn describe_code(code: &u32) -> String {
         53 => "network path not found (is the server name right, and the machine on?)",
         67 => "that shared folder does not exist on the server",
         86 | 1326 => "wrong user name or password",
-        1219 => "Windows already has a session with that server under a different user",
+        1219 => {
+            "Windows already has a session with that server under a different user; \
+             close the files and folders open there (Explorer, Office...) and try again"
+        }
         1244 | 5 => "access denied for that user",
         1231 | 1232 => "the server is not reachable on the network",
         _ => return format!("network error {code}"),
@@ -129,12 +134,23 @@ fn describe_code(code: &u32) -> String {
     format!("{hint} (code {code})")
 }
 
-/// Drops any existing connection to `share`. The result is deliberately
-/// ignored: having nothing connected is not an error.
+/// Whether `disconnect` may close files other programs have open through
+/// the connection. Never: forcing it, a document opened from the share in
+/// Word or Excel lost its file, and with it any unsaved work.
+const FORCE_DISCONNECT: bool = false;
+
+/// Drops the connection to `share`, unless something still has files open
+/// through it: then it is left as it is. The result is deliberately ignored:
+/// having nothing connected is not an error, and a connection kept open by
+/// another program only means it stays.
 pub fn disconnect(share: &str) {
     let wide = to_wide(share);
     unsafe {
-        let _ = WNetCancelConnection2W(PCWSTR(wide.as_ptr()), NET_CONNECT_FLAGS(0), true);
+        let _ = WNetCancelConnection2W(
+            PCWSTR(wide.as_ptr()),
+            NET_CONNECT_FLAGS(0),
+            FORCE_DISCONNECT,
+        );
     }
 }
 
@@ -166,9 +182,9 @@ fn add_connection(share: &str, user: &str, password: &str) -> u32 {
 ///
 /// If Windows already has a session with that server under another user
 /// (error 1219), only connections WITHOUT a drive letter (transient ones:
-/// Explorer, previous runs) are closed and the connection is retried. The
-/// user's mapped network drives are never disconnected: if they cause the
-/// conflict, the returned error names them.
+/// Explorer, previous runs) are closed, and only those with no files open,
+/// and the connection is retried. The user's mapped network drives are never
+/// disconnected: if they cause the conflict, the returned error names them.
 pub fn connect(share: &str, user: &str, password: &str) -> Result<(), NetUseError> {
     disconnect(share);
     let mut code = add_connection(share, user, password);

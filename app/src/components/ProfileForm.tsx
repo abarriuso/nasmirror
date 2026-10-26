@@ -81,7 +81,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
               : needsCreds && !isNetwork(profile.source) && !isNetwork(profile.destination)
                 ? 'The user name and password are only used for a network path (\\\\nas\\share): untick that option.'
                 : macInvalid
-                  ? 'Enter the MAC address of the destination (12 hex digits, e.g. AA:BB:CC:DD:EE:FF).'
+                  ? 'Enter the MAC address of the NAS to wake (12 hex digits, e.g. AA:BB:CC:DD:EE:FF).'
                   : null
 
   const pickFolder = async (which: 'source' | 'destination') => {
@@ -282,7 +282,7 @@ export function ProfileForm({ initial, onCancel, onSave }: Props) {
 
       <label className="field field--checkbox">
         <input type="checkbox" checked={needsWol} onChange={(e) => setNeedsWol(e.target.checked)} />
-        <span>Wake the destination over the network (Wake-on-LAN) if it is off</span>
+        <span>Wake the NAS over the network (Wake-on-LAN) if it is off, whether it is the source or the destination</span>
       </label>
       {needsWol && (
         <div className="field-row indent">

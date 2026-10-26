@@ -16,7 +16,7 @@ import { JobView } from './components/JobView'
 import { JobSteps, type JobStep, type ScanSnapshot, type StepEnd } from './components/JobSteps'
 import { ResultsPanel } from './components/ResultsPanel'
 import { HistoryPanel } from './components/HistoryPanel'
-import { OUTCOME_BADGE } from './outcomes'
+import { OUTCOME } from './outcomes'
 import { notifyFinished } from './notify'
 import { askToConfirm, showError } from './dialogs'
 import type { SpeedSample } from './components/SpeedChart'
@@ -45,6 +45,8 @@ type View =
       scan: ScanTotals
       warning: string | null
       deletions: DeletionGroup[]
+      /** How many items at the top of the destination would be deleted; `deletions` names the largest. */
+      deletionGroups: number
       /** Why the deletions need an explicit yes; `null` when routine. */
       confirmDeletions: string | null
     }
@@ -66,6 +68,8 @@ interface JobState {
   bytesDeleted: number
   itemsToDelete: number
   currentFile: string
+  /** `currentFile` was deleted from the destination, not copied from the source. */
+  currentDeleted: boolean
   samples: SpeedSample[]
 }
 
@@ -82,6 +86,7 @@ function emptyJobState(): JobState {
     bytesDeleted: 0,
     itemsToDelete: 0,
     currentFile: '',
+    currentDeleted: false,
     samples: [],
   }
 }
@@ -209,6 +214,7 @@ export default function App() {
           },
           warning: event.warning,
           deletions: event.deletions,
+          deletionGroups: event.deletion_groups,
           confirmDeletions: event.confirm_deletions,
         }
         // The final numbers, folders to create included, for the step list.
@@ -256,7 +262,9 @@ export default function App() {
             filesTotal,
             itemsDeleted: event.items_deleted,
             bytesDeleted: event.bytes_deleted,
+            // The final sample has no file: the last one named stays.
             currentFile: event.current_file || j.currentFile,
+            currentDeleted: event.current_file ? event.current_deleted : j.currentDeleted,
             samples,
           }
         })
@@ -278,6 +286,7 @@ export default function App() {
     scan: ScanTotals
     warning: string | null
     deletions: DeletionGroup[]
+    deletionGroups: number
     confirmDeletions: string | null
   } | null>(null)
   const pendingContext = useRef<{
@@ -315,6 +324,7 @@ export default function App() {
         },
         warning: null,
         deletions: [],
+        deletionGroups: 0,
         confirmDeletions: null,
       }
       setView({
@@ -326,6 +336,7 @@ export default function App() {
         scan: found.scan,
         warning: found.warning,
         deletions: found.deletions,
+        deletionGroups: found.deletionGroups,
         confirmDeletions: found.confirmDeletions,
       })
       return
@@ -534,6 +545,7 @@ export default function App() {
             destination={view.profile.destination}
             mirror={view.profile.mode === 'mirror'}
             deletions={view.deletions}
+            deletionGroups={view.deletionGroups}
             confirmDeletions={view.confirmDeletions}
             steps={job.steps}
             scanSnapshot={job.scan}
@@ -554,6 +566,7 @@ export default function App() {
             bytesDeleted={job.bytesDeleted}
             itemsToDelete={job.itemsToDelete}
             currentFile={job.currentFile}
+            currentDeleted={job.currentDeleted}
             samples={job.samples}
             steps={job.steps}
             source={view.profile.source}
@@ -731,7 +744,7 @@ function lastRunOf(p: Profile, history: HistoryEntry[]): HistoryEntry | undefine
 
 function LastRun({ entry }: { entry: HistoryEntry | undefined }) {
   if (!entry?.outcome) return <span className="profile-card__last">Never run</span>
-  const badge = OUTCOME_BADGE[entry.outcome]
+  const badge = OUTCOME[entry.outcome]
   return (
     <span className="profile-card__last" title={entry.error ?? undefined}>
       Last run {formatWhen(entry.finished_at)} ·{' '}
@@ -779,6 +792,7 @@ function PreviewPanel({
   destination,
   mirror,
   deletions,
+  deletionGroups,
   confirmDeletions,
   steps,
   scanSnapshot,
@@ -793,6 +807,8 @@ function PreviewPanel({
   mirror: boolean
   /** What mirror mode would delete, by item at the top of the destination. */
   deletions: DeletionGroup[]
+  /** How many such items there are in all: `deletions` names the largest. */
+  deletionGroups: number
   /** Why the deletions need the box ticked before copying; `null` when routine. */
   confirmDeletions: string | null
   /** How the preview was worked out, for its details. */
@@ -812,6 +828,10 @@ function PreviewPanel({
   const sameName = deletions.find((g) => g.is_dir && g.name.toLowerCase() === sourceName)
   const intended = sameName ? `${destination.trim().replace(/[\\/]+$/, '')}\\${sameName.name}` : null
   const mustConfirm = filesToDelete > 0 && confirmDeletions !== null
+  // The list names the largest items only: say what it leaves out, or it
+  // reads as everything that goes.
+  const unlisted = Math.max(0, deletionGroups - deletions.length)
+  const unlistedBytes = Math.max(0, scan.bytes_to_delete - deletions.reduce((sum, g) => sum + g.bytes, 0))
   return (
     <div className="preview-panel">
       <h2>Before copying</h2>
@@ -863,6 +883,14 @@ function PreviewPanel({
                 </span>
               </li>
             ))}
+            {unlisted > 0 && (
+              <li className="deletions__more">
+                <span>
+                  and {plural(unlisted, 'more item', 'more items')} at the top of the destination
+                </span>
+                <span>{formatBytes(unlistedBytes)}</span>
+              </li>
+            )}
           </ul>
           {/* The same-name case has its own box above; the others (a root,
               a large deletion) say here why this needs a yes. */}

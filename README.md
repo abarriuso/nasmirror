@@ -127,11 +127,12 @@ by hand:
 | Code | Meaning                                                             |
 |------|---------------------------------------------------------------------|
 | 0    | Copy succeeded, or nothing to do                                    |
-| 1    | The copy failed, it could not connect, the saved jobs could not be read, or a mirror run refused deletions that need a yes in the window (nothing was copied or deleted) |
+| 1    | The copy failed, it could not connect, the saved jobs could not be read, a mirror run refused deletions that need a yes in the window, or another NASMirror (the window or another task) was already running a job (in the last two, nothing was copied or deleted) |
 | 2    | Cancelled                                                           |
 | 3    | Job not found                                                       |
-| 4    | Finished with warnings (robocopy: attribute differences; restic: some files could not be read) |
+| 4    | Finished with warnings (robocopy: a name that is a file on one side and a folder on the other, not copied; restic: some files could not be read) |
 | 5    | The job needs a password (network or restic) and cannot run headless |
+| 6    | The arguments were not understood (a typo such as `--dryrun`, or `--job` with no name) |
 
 ## Built with
 

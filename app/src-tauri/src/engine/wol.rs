@@ -10,7 +10,7 @@ use tokio::time::timeout;
 pub enum WolError {
     #[error("invalid MAC address: {0}")]
     InvalidMac(String),
-    #[error("the destination ({0}) did not respond after Wake-on-LAN (timed out)")]
+    #[error("{0} did not respond after Wake-on-LAN (timed out): check that it is on the network and that its MAC address is right")]
     Timeout(String),
     #[error("Wake-on-LAN cancelled")]
     Cancelled,

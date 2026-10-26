@@ -97,7 +97,7 @@ function ScanStats({ scan, source, active }: { scan: ScanSnapshot; source: strin
 function stepLabel(phase: JobPhase, active: boolean, ended: StepEnd): string {
   if (active) return PHASE_LABEL[phase]
   if (ended === 'done') return PHASE_DONE_LABEL[phase]
-  // "Connecting to the destination…" → "Connecting to the destination failed"
+  // "Waking the NAS (Wake-on-LAN)…" → "Waking the NAS (Wake-on-LAN) failed"
   return `${PHASE_LABEL[phase].replace(/…$/, '')} ${ended === 'failed' ? 'failed' : 'stopped'}`
 }
 

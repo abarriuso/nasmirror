@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from '../api'
 import type { JobResult, Profile } from '../types'
 import { formatBytes, formatCount, formatDuration } from '../format'
+import { OUTCOME } from '../outcomes'
 import { JobSteps, type JobStep } from './JobSteps'
 
 interface Props {
@@ -19,28 +20,13 @@ function logId(logPath: string): string {
   return (logPath.split(/[\\/]/).pop() ?? '').replace(/\.log$/i, '')
 }
 
-const OUTCOME_INFO: Record<
-  JobResult['outcome'],
-  { icon: string; tone: 'ok' | 'warn' | 'error'; title: string }
-> = {
-  success: { icon: '✓', tone: 'ok', title: 'Backup finished' },
-  no_changes: { icon: '✓', tone: 'ok', title: 'Destination was already up to date' },
-  success_with_mismatches: {
-    icon: '!',
-    tone: 'warn',
-    title: 'Finished with warnings',
-  },
-  cancelled: { icon: '■', tone: 'warn', title: 'Backup cancelled' },
-  failed: { icon: '✕', tone: 'error', title: 'Backup failed' },
-  connection_error: { icon: '✕', tone: 'error', title: 'Could not connect' },
-}
-
 /** Turns robocopy's exit-code bitmask into plain language. */
 function explainRobocopyExit(code: number, mirror: boolean): string {
   const bits: string[] = []
   if (code & 1) bits.push('files copied')
   if (code & 2) bits.push(mirror ? 'extra files deleted from the destination' : 'extra files in the destination')
-  if (code & 4) bits.push('files with attribute differences')
+  // Not attributes: a name that is a file on one side and a folder on the other.
+  if (code & 4) bits.push('mismatched files or folders not copied')
   if (code & 8) bits.push('some files failed')
   if (code & 16) bits.push('fatal error')
   if (bits.length === 0) return 'no changes'
@@ -48,11 +34,9 @@ function explainRobocopyExit(code: number, mirror: boolean): string {
 }
 
 export function ResultsPanel({ result, profile, steps, onClose, onOpenLogDir }: Props) {
-  const info = OUTCOME_INFO[result.outcome]
+  const info = OUTCOME[result.outcome]
   const mirror = profile.mode === 'mirror'
   const [log, setLog] = useState<string | null>(null)
-  // Only a run that got as far as copying wrote a log.
-  const hasLog = result.summary !== null
   const toggleLog = async () => {
     if (log !== null) return setLog(null)
     try {
@@ -77,8 +61,9 @@ export function ResultsPanel({ result, profile, steps, onClose, onOpenLogDir }: 
       {/* Robocopy's meaning of "warnings"; restic explains its own in `error`. */}
       {result.outcome === 'success_with_mismatches' && result.summary?.engine !== 'restic' && (
         <p className="results-panel__hint">
-          Some files had different attributes or permissions. The data itself was copied correctly.
-          Check the log for details.
+          Robocopy found a name that is a file in the source and a folder in the destination, or
+          the reverse. It cannot copy one over the other, so those files are not in the copy.
+          Rename or remove one of the two and run the job again.
         </p>
       )}
       {result.error && <p className="results-panel__error">{result.error}</p>}
@@ -169,7 +154,7 @@ export function ResultsPanel({ result, profile, steps, onClose, onOpenLogDir }: 
         </pre>
       )}
       <div className="results-panel__actions">
-        {hasLog && (
+        {result.has_log && (
           <button type="button" aria-expanded={log !== null} onClick={toggleLog}>
             {log === null ? 'View log' : 'Hide log'}
           </button>

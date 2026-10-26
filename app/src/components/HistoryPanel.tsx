@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { askToConfirm } from '../dialogs'
-import { formatBytes, formatDuration, formatWhen } from '../format'
+import { formatBytes, formatDuration, formatWhen, plural } from '../format'
 import type { HistoryEntry } from '../types'
-import { OUTCOME_BADGE } from '../outcomes'
+import { OUTCOME } from '../outcomes'
 
 interface Props {
   onClose: () => void
@@ -90,7 +90,7 @@ export function HistoryPanel({ onClose }: Props) {
 
       <ul className="history__list" role="list">
         {entries?.map((entry) => {
-          const badge = entry.outcome ? OUTCOME_BADGE[entry.outcome] : null
+          const badge = entry.outcome ? OUTCOME[entry.outcome] : null
           return (
             <li key={entry.id} className="history__item">
               <div className="history__main">
@@ -111,7 +111,7 @@ export function HistoryPanel({ onClose }: Props) {
                 </span>
                 {entry.outcome && (
                   <span className="history__meta">
-                    {entry.files_copied} files · {formatBytes(entry.bytes_copied)} ·{' '}
+                    {plural(entry.files_copied, 'file')} · {formatBytes(entry.bytes_copied)} ·{' '}
                     {formatDuration(entry.elapsed_secs)}
                   </span>
                 )}

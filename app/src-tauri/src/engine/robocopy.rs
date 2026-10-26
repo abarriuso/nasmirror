@@ -335,8 +335,12 @@ pub struct ScanOutcome {
     /// could read can still be copied.
     pub warning: Option<String>,
     /// What mirror mode would delete, by item at the top of the destination,
-    /// largest first (at most `DELETION_GROUPS`).
+    /// largest first (at most `DELETION_GROUPS`, plus a folder named like
+    /// the source wherever it ranks).
     pub deletions: Vec<DeletionGroup>,
+    /// How many items at the top of the destination would be deleted in
+    /// all, named in `deletions` or not.
+    pub deletion_groups: u64,
 }
 
 /// How many top-level items of the destination the preview names.
@@ -366,10 +370,18 @@ impl DeletionTally {
         }
     }
 
-    fn largest(self) -> Vec<DeletionGroup> {
+    /// The largest groups, and always the folder named `keep` (the source's
+    /// name): an earlier copy of the source is what `deletion_guard` looks
+    /// for, and it can be smaller than a dozen other things being deleted.
+    fn largest(self, keep: Option<&str>) -> Vec<DeletionGroup> {
+        let keep = keep.map(str::to_lowercase);
         let mut groups: Vec<DeletionGroup> = self.groups.into_values().collect();
         groups.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(b.files.cmp(&a.files)));
-        groups.truncate(DELETION_GROUPS);
+        let mut rank = 0;
+        groups.retain(|g| {
+            rank += 1;
+            rank <= DELETION_GROUPS || (g.is_dir && Some(g.name.to_lowercase()) == keep)
+        });
         groups
     }
 }
@@ -480,7 +492,8 @@ pub async fn scan(
     Ok(Some(ScanOutcome {
         totals: found,
         warning,
-        deletions: deletions.largest(),
+        deletion_groups: deletions.groups.len() as u64,
+        deletions: deletions.largest(super::folder_name(src).as_deref()),
     }))
 }
 
@@ -592,6 +605,26 @@ pub fn default_log_path(log_dir: &Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_folder_named_like_the_source_is_kept_wherever_it_ranks() {
+        let tally = || {
+            let mut tally = DeletionTally::default();
+            for n in 0..20u64 {
+                let name = format!("big{n}");
+                let group = DeletionGroup { name: name.clone(), is_dir: false, files: 1, bytes: 1_000 + n };
+                tally.groups.insert(name, group);
+            }
+            let photos = DeletionGroup { name: "Photos".into(), is_dir: true, files: 1, bytes: 1 };
+            tally.groups.insert("photos".into(), photos);
+            tally
+        };
+        assert_eq!(tally().largest(None).len(), DELETION_GROUPS);
+        let kept = tally().largest(Some("PHOTOS"));
+        assert_eq!(kept.len(), DELETION_GROUPS + 1);
+        assert_eq!(kept[0].name, "big19", "still largest first");
+        assert_eq!(kept.last().map(|g| g.name.as_str()), Some("Photos"));
+    }
 
     #[test]
     fn log_paths_do_not_collide_within_the_same_second() {

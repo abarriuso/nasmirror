@@ -26,6 +26,8 @@ interface Props {
   bytesDeleted: number
   itemsToDelete: number
   currentFile: string
+  /** `currentFile` was deleted from the destination, not copied from the source. */
+  currentDeleted: boolean
   samples: SpeedSample[]
   /** What the job has done so far (connecting, copying...), with details. */
   steps: JobStep[]
@@ -58,6 +60,7 @@ export const JobView = memo(function JobView({
   bytesDeleted,
   itemsToDelete,
   currentFile,
+  currentDeleted,
   samples,
   steps,
   source,
@@ -70,9 +73,6 @@ export const JobView = memo(function JobView({
   // small files, moves few bytes but is still getting on.
   const pct =
     copyProgress(bytesDone, bytesTotal, filesDone, filesTotal, itemsDeleted, itemsToDelete) * 100
-  // The latest line is a file copied from the source, or one deleted from
-  // the destination.
-  const latestIsCopy = currentFile.toLowerCase().startsWith(source.trim().toLowerCase())
   const speed10s = recentAvgSpeed(samples, 10_000)
   // From the pace of files and bytes together, over the last 10 s and 60 s:
   // estimated from bytes alone, a run of small files once read "313 h left".
@@ -88,7 +88,7 @@ export const JobView = memo(function JobView({
         <div className="job-view__meta">
           {phase === 'copying' && (
             <div className="job-view__phase">
-              {currentFile && !latestIsCopy ? 'Deleting what is not in the source…' : PHASE_LABEL[phase]}
+              {currentFile && currentDeleted ? 'Deleting what is not in the source…' : PHASE_LABEL[phase]}
             </div>
           )}
           <div className="job-view__eta">
@@ -108,15 +108,15 @@ export const JobView = memo(function JobView({
       >
         <div
           className="progress-fill"
-          style={{ width: `${phase === 'copying' || phase === 'done' ? pct : 0}%` }}
+          style={{ width: `${phase === 'copying' ? pct : 0}%` }}
         />
       </div>
       {/* Robocopy names a file as it finishes it (or, with /MT, as it
           starts): "latest" fits both. */}
       {currentFile && (
         <div className="job-view__current-file" title={currentFile}>
-          {latestIsCopy ? 'Latest: ' : 'Deleted: '}
-          {latestIsCopy ? relativePath(source, currentFile) : currentFile}
+          {currentDeleted ? 'Deleted: ' : 'Latest: '}
+          {currentDeleted ? currentFile : relativePath(source, currentFile)}
         </div>
       )}
 
