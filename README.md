@@ -78,7 +78,7 @@ in step with a NAS, this is what changes. The figures come from the
 | | File Explorer | NASMirror |
 |---|---|---|
 | **Thousands of small files** (documents, code) | 102 files/s | 739 files/s: **7× faster**, because it copies 16 files at a time |
-| **Copying again** next week | Copies everything again (*Replace*), or skips every name that already exists, edited files included (*Skip*) | Copies only new and changed files |
+| **Copying again** next week | Copies everything again (*Replace*): 55 s for the 6,000 files, even if only a few changed. Or skips every name that already exists, edited files included (*Skip*) | Copies only new and changed files: 1.7 s with 120 of the 6,000 edited, **32× faster** |
 | **Files you deleted** from the PC | Stay on the copy forever | Removed from the copy too (mirror mode), after you have seen the list; large deletions need an explicit yes |
 | **A file open in another program** | The copy stops at that file and waits for you: 2,500 of 6,000 files copied in the test | Retries it once, skips it, copies the other 5,999 and says so at the end |
 | **The network drops halfway** | Start again, and choose between *Replace* and *Skip* | Run the job again: it copies what is missing |
@@ -95,6 +95,8 @@ a folder, both copying the same test folders from a PC to a NAS.
 | Test | File Explorer | NASMirror | |
 |---|---|---|---|
 | **6,000 small files**, 1–64 KB, 89 MB in all (documents, code) | 58.6 s (58.1–59.3)<br>102 files/s | 8.1 s (8.0–8.6)<br>739 files/s | **7.2× faster** |
+| **Copying them again**, nothing changed | 54.9 s (54.4–55.3)<br>*Replace* copies all 6,000 again | 1.6 s (1.6–1.7)<br>compares, copies nothing | **35× faster** |
+| **Copying them again**, 120 files (2%) edited | 54.9 s, the same: all 6,000 again | 1.7 s (1.7–1.8)<br>copies the 120 | **32× faster** |
 
 **How it was measured**
 
@@ -103,16 +105,26 @@ a folder, both copying the same test folders from a PC to a NAS.
   numbers; the gap between the two tools is the point.
 - **Test files:** generated random data (incompressible, like photos and
   video), so neither compression nor deduplication can help either tool.
-- **Runs:** 3 per tool and test, alternating which tool goes first, into an
-  empty folder every time. The table shows the median, and the fastest and
-  slowest run in brackets. Both tools read the source from memory (every file
-  was read once beforehand), so the PC's disk is not part of the result.
+- **Runs:** 3 per tool and test. For the first copy, alternating which tool
+  goes first, into an empty folder every time. The table shows the median,
+  and the fastest and slowest run in brackets. Both tools read the source
+  from memory (every file was read once beforehand), so the PC's disk is not
+  part of the result.
 - **File Explorer** is Windows' shell copy engine (`SHFileOperation`), the one
   behind Explorer's copy and paste; driving it through Explorer's scripting
   interface (`Shell.Application.CopyHere`) took the same time.
 - **NASMirror** is `robocopy <source> <destination> /MIR /BYTES /NP /NC /FP
   /R:1 /W:2 /NDL /MT:16`, timed together with the preview comparison
   (`robocopy … /L`) it runs first.
+- **Copying again:** the 6,000 files were copied to the NAS once, then each
+  tool copied the folder over that copy: with nothing changed, and with 120
+  files rewritten with new content before each run. Explorer was told to
+  *Replace* every file, the only choice that brings edited files across
+  (*Skip* would have left them out).
+- **Big files** (photos, video) are not in the table yet. On the test NAS,
+  writing fell to 3–10 MB/s after the first gigabyte or two, whichever tool
+  was copying, while reading from it ran at 120 MB/s (the full gigabit), so
+  those runs measured the NAS's disks, not the tools.
 - **A file open in another program:** one of the 6,000 small files was held
   open, without sharing, by another process (copying to a local folder).
   Explorer's engine stopped there with a sharing violation; in the Explorer

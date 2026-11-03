@@ -16,6 +16,8 @@ param(
     [string[]] $Datasets = @('small', 'photos', 'videos'),
     [int] $Runs = 3,
     [switch] $Incremental,
+    # The folders the "copying again" tests use.
+    [string[]] $IncrementalSets = @('small', 'photos'),
     [switch] $LongPath,
     # Seconds to let the NAS flush its write cache between runs: without it,
     # a long series of big writes measures the NAS slowing down, not the tool.
@@ -24,6 +26,7 @@ param(
 $ErrorActionPreference = 'Stop'
 # -File passes "a,b" as one string.
 $Datasets = $Datasets -split ','
+$IncrementalSets = $IncrementalSets -split ','
 
 function Pause-ForNas { if ($Cooldown -gt 0) { Start-Sleep -Seconds $Cooldown } }
 
@@ -110,12 +113,14 @@ foreach ($ds in $Datasets | Where-Object { $_ -and $_ -ne 'none' }) {
 }
 
 if ($Incremental) {
-    # Copy small + photos once, then re-run with nothing changed and with ~2% changed.
+    # Copy the folders once, then re-run with nothing changed and with ~2% changed.
     $src = Join-Path $Data 'incr'
     Remove-Tree $src
     New-Item -ItemType Directory -Force $src | Out-Null
-    & robocopy (Join-Path $Data 'small') (Join-Path $src 'small') /E /MT:16 /NFL /NDL /NJH /NJS | Out-Null
-    & robocopy (Join-Path $Data 'photos') (Join-Path $src 'photos') /E /MT:16 /NFL /NDL /NJH /NJS | Out-Null
+    foreach ($ds in $IncrementalSets) {
+        & robocopy (Join-Path $Data $ds) (Join-Path $src $ds) /E /MT:16 /NFL /NDL /NJH /NJS | Out-Null
+    }
+    $sets = $IncrementalSets -join '+'
     Warm $src
     $parent = Join-Path $Dest 'incr'
     $target = Join-Path $parent 'incr'
@@ -125,7 +130,7 @@ if ($Incremental) {
     $all = Get-ChildItem -LiteralPath $src -Recurse -File
     $rng = [Random]::new(7)
     for ($i = 1; $i -le $Runs; $i++) {
-        Record 'unchanged' 'small+photos' 'NASMirror' $i (Run-Robocopy $src $target "unchanged-$i") (Stats $target)
+        Record 'unchanged' $sets 'NASMirror' $i (Run-Robocopy $src $target "unchanged-$i") (Stats $target)
     }
     for ($i = 1; $i -le $Runs; $i++) {
         # Rewrite 2% of the files with new content (same size, new date).
@@ -136,12 +141,12 @@ if ($Incremental) {
         Warm $src
         $r = Run-Robocopy $src $target "changed-$i"
         $r.Note = "$($pick.Count) files changed"
-        Record 'changed2pct' 'small+photos' 'NASMirror' $i $r (Stats $target)
+        Record 'changed2pct' $sets 'NASMirror' $i $r (Stats $target)
     }
     for ($i = 1; $i -le $Runs; $i++) {
         # Explorer has no "only what changed": copying again means replacing everything.
         Pause-ForNas
-        Record 'unchanged' 'small+photos' 'Explorer (replace all)' $i (Run-Explorer $src $parent) (Stats $target)
+        Record 'unchanged' $sets 'Explorer (replace all)' $i (Run-Explorer $src $parent) (Stats $target)
     }
     Remove-Tree $parent
     Remove-Tree $src

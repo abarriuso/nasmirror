@@ -7,7 +7,7 @@ and with File Explorer's copy engine, and time both.
 | Script | What it does |
 |---|---|
 | `make-data.py` | Writes the test folders: 6,000 small files, 400 photos, a 1.5 GB video, and a path over 260 characters. Random content, so compression cannot help either tool. |
-| `bench.ps1` | Copies each folder to the NAS with both tools, alternating which goes first, and writes the times to `results.csv`. `-Incremental` adds the "copying again" tests, `-LongPath` the long-path check. |
+| `bench.ps1` | Copies each folder to the NAS with both tools, alternating which goes first, and writes the times to `results.csv`. `-Incremental` adds the "copying again" tests (`-IncrementalSets small` for the small files only), `-LongPath` the long-path check. |
 | `locked.ps1` | Copies the small files while one of them is held open by another program. |
 | `shellcopy.ps1` | File Explorer's copy engine (`SHFileOperation`), used by the two scripts above. |
 
@@ -19,6 +19,7 @@ into local ones):
 ```powershell
 python make-data.py D:\bench-data small photos videos longpath
 .\bench.ps1 -Data D:\bench-data -Dest \\nas\share\nasmirror-bench -Incremental -Cooldown 180
+.\bench.ps1 -Data D:\bench-data -Dest \\nas\share\nasmirror-bench -Datasets none -Incremental -IncrementalSets small -Cooldown 60
 .\locked.ps1 -Data D:\bench-data -Dest D:\bench-locked
 ```
 
