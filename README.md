@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/screenshots/hero.png" alt="NASMirror copying a photo folder to a NAS: progress, a live chart of data and files per second, and each step with its exact command" width="900">
+  <img src="docs/screenshots/hero.png" alt="NASMirror copying a photo folder to a NAS: progress, a live chart of data and files per second, and what is being copied by type of file" width="900">
 </p>
 
 <h1 align="center">NASMirror</h1>
@@ -130,10 +130,10 @@ your own NAS.
 <table>
   <tr>
     <td width="50%"><img src="docs/screenshots/jobs.png" alt="The list of saved jobs, each with its paths, mode and last run"><br><b>Your jobs</b>, each with how its last run went.</td>
-    <td width="50%"><img src="docs/screenshots/preview.png" alt="The preview before a mirror copy: files to copy, folders to create and the files mirror mode will delete"><br><b>Before copying</b>: what will be copied and deleted, and the exact commands behind it.</td>
+    <td width="50%"><img src="docs/screenshots/preview.png" alt="The preview before a mirror copy: what will be copied by type of file, and the folders mirror mode will delete"><br><b>Before copying</b>: what will be copied, by type, folder or size, and what will be deleted.</td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/results.png" alt="The results panel: folders, files copied and deleted, data, duration and robocopy's exit code in plain words"><br><b>When it ends</b>: what was done, in plain words, with the log one click away.</td>
+    <td width="50%"><img src="docs/screenshots/results.png" alt="The results panel: files copied and deleted, data, duration, robocopy's exit code in plain words, and what was copied by type"><br><b>When it ends</b>: what was done, in plain words, with the log one click away.</td>
     <td width="50%"><img src="docs/screenshots/job-form.png" alt="The job form: source, destination, direct copy or versioned snapshots, add-only or mirror"><br><b>A job</b>: source and destination, direct copy or versioned snapshots, add-only or mirror.</td>
   </tr>
 </table>
@@ -234,6 +234,9 @@ by hand:
   exact command line it runs.
 - **Live progress** — progress bar, transferred/total, speed, files, time
   left, and a live chart of data and files per second over the last minute.
+- **What is in the copy** (robocopy) — the files to copy grouped by type
+  (photos, video, documents, code, archives...), by folder or by size: in the
+  preview, filling in live while it copies, and in the results.
 - **Mirror and add-only modes** — mirror leaves the destination identical to
   the source (deleting whatever is left over); add-only only adds and updates,
   never deletes. Point a mirror at a folder of its own (`\\nas\copy\Photos`),
